@@ -185,6 +185,29 @@ def atualizar_banco(df_ctrl_atual: pd.DataFrame,
 
     return df_final, df_hist_new
 
+# ── Registrar bloqueio (cliente clicou em BLOQUEAR no WhatsApp) ──────────────
+def registrar_bloqueio(telefone_portado: str) -> bool:
+    """
+    Marca o cliente como BLOQUEADO pelo TELEFONE_PORTADO.
+    Cliente sai dos envios do dia automaticamente.
+    Retorna True se encontrou e atualizou, False se não encontrou.
+    """
+    df = carregar_controle()
+    if df is None or len(df) == 0:
+        return False
+
+    # Buscar por NUMERO PORTADO
+    tel = str(telefone_portado).strip()
+    mask = df['NUMERO PORTADO'].astype(str).str.strip() == tel
+
+    if not mask.any():
+        return False
+
+    df.loc[mask, 'STATUS PAGAMENTO'] = 'BLOQUEADO'
+    df.loc[mask, 'ETAPA']            = None   # sai do funil
+    salvar_controle(df)
+    return True
+
 # ── Registrar envio ───────────────────────────────────────────────────────────
 def registrar_envio(numero_acesso: str, etapa: str, tipo: str, data_envio: date):
     df = carregar_controle()

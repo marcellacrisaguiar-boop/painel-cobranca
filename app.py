@@ -8,8 +8,31 @@ from processamento import (processar_arquivo, calcular_resumo,
                             carregar_conectadas_de_bytes, conectadas_carregado,
                             get_data_upload_conectadas)
 from banco import (carregar_controle, salvar_controle, carregar_historico,
-                   atualizar_banco, registrar_envio,
+                   atualizar_banco, registrar_envio, registrar_bloqueio,
                    carregar_snapshots, salvar_snapshot)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ENDPOINT WEBHOOK — recebe bloqueio do n8n quando cliente clica em BLOQUEAR
+# Chamada: GET/POST ?action=bloquear&telefone=11987654321&token=SEU_TOKEN
+# ══════════════════════════════════════════════════════════════════════════════
+import os as _os
+_WEBHOOK_TOKEN = _os.getenv('WEBHOOK_TOKEN', '')
+
+_params = st.query_params
+if _params.get('action') == 'bloquear':
+    _token = _params.get('token', '')
+    _tel   = _params.get('telefone', '')
+    if _WEBHOOK_TOKEN and _token != _WEBHOOK_TOKEN:
+        st.error('Token inválido.'); st.stop()
+    elif not _tel:
+        st.error('Telefone não informado.'); st.stop()
+    else:
+        _ok = registrar_bloqueio(_tel)
+        if _ok:
+            st.success(f'✅ Cliente {_tel} marcado como BLOQUEADO.')
+        else:
+            st.warning(f'⚠️ Cliente {_tel} não encontrado.')
+        st.stop()
 
 # ══════════════════════════════════════════════════════════════════════════════
 st.set_page_config(page_title="Painel de Cobrança", page_icon="📊",
@@ -688,6 +711,23 @@ with tab4:
                                file_name=f'{etapa.lower().replace(" ","_")}_{hoje}.csv',
                                mime='text/csv', key=f'dl_{etapa}')
             st.markdown('<hr style="margin:.6rem 0;opacity:.15">', unsafe_allow_html=True)
+
+        # ── Painel de bloqueados ──────────────────────────────────────────────
+        st.markdown('---')
+        st.markdown('<div class="sec">Clientes que solicitaram bloqueio</div>', unsafe_allow_html=True)
+        df_bloq = df[df['STATUS PAGAMENTO'] == 'BLOQUEADO'] if df is not None and len(df) > 0 else pd.DataFrame()
+        if len(df_bloq) == 0:
+            st.markdown("<small style='color:#3B4163'>Nenhum cliente solicitou bloqueio ainda.</small>",
+                        unsafe_allow_html=True)
+        else:
+            st.markdown(mc('Bloqueados', f'{len(df_bloq):,}',
+                           sub='Não receberão novos envios', tipo='verm'),
+                        unsafe_allow_html=True)
+            cols_b = ['SAFRA','NOME','NUMERO PORTADO','NUMERO LINHA',
+                      'FATURA','VALOR','VENCIMENTO','PORTABILIDADE']
+            df_b = df_bloq[[c for c in cols_b if c in df_bloq.columns]].copy()
+            df_b = df_b.replace({None:'','None':''})
+            st.dataframe(df_b, use_container_width=True, height=200, hide_index=True)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TAB 4 — TABELA DE FLUXO

@@ -9,6 +9,10 @@ from pathlib import Path
 
 # ── Cache do CONECTADAS ───────────────────────────────────────────────────────
 _PORT_CACHE = {}
+_CONECTADAS_DATA_UPLOAD = None
+
+def get_data_upload_conectadas():
+    return _CONECTADAS_DATA_UPLOAD
 
 def _carregar_conectadas(extra_path=None):
     """
@@ -48,6 +52,9 @@ def _carregar_conectadas(extra_path=None):
                     'port':  {**con.set_index('TEL_STR')['PORTABILIDADE'].to_dict(),
                                **con.set_index('NUM_STR')['PORTABILIDADE'].to_dict()},
                 }
+                global _CONECTADAS_DATA_UPLOAD
+                from datetime import datetime
+                _CONECTADAS_DATA_UPLOAD = datetime.now().strftime('%d/%m/%Y %H:%M')
                 print(f"[CONECTADAS] ✓ Carregado: {path} ({len(con)} registros)")
                 return _PORT_CACHE
             except Exception as e:
@@ -75,6 +82,9 @@ def carregar_conectadas_de_bytes(file_bytes, filename):
             'port':  {**con.set_index('TEL_STR')['PORTABILIDADE'].to_dict(),
                        **con.set_index('NUM_STR')['PORTABILIDADE'].to_dict()},
         }
+        global _CONECTADAS_DATA_UPLOAD
+        from datetime import datetime
+        _CONECTADAS_DATA_UPLOAD = datetime.now().strftime('%d/%m/%Y %H:%M')
         print(f"[CONECTADAS] ✓ Carregado via upload: {len(con)} registros")
         return True
     except Exception as e:
@@ -83,6 +93,11 @@ def carregar_conectadas_de_bytes(file_bytes, filename):
 
 def conectadas_carregado():
     return bool(_PORT_CACHE)
+
+def resetar_conectadas():
+    """Limpa o cache para forçar recarregamento de uma nova versão do CONECTADAS."""
+    global _PORT_CACHE
+    _PORT_CACHE = {}
 
 def _fmt_num(v):
     try:    return str(int(float(v))) if v else ''
@@ -203,6 +218,10 @@ def processar_arquivo(uploaded_file, safra: str):
         elif portin not in ('','0',0):             port_label = 'Nao Concluida'
         else:                                      port_label = ''
 
+        st1 = str(row.get('1ª fatura - Status da fatura') or '').strip()
+        st2 = str(row.get('2ª fatura - Status da fatura') or '').strip()
+        # Status de pagamento = status real da fatura mais urgente
+        status_pag = st1 if fat['num'] == 1 else st2
         rows.append({
             'SAFRA':            safra,
             'CPF':              str(row.get('Cpf','') or ''),
@@ -213,6 +232,8 @@ def processar_arquivo(uploaded_file, safra: str):
             'NUMERO LINHA':     _fmt_num(con.get('linha',{}).get(na,'')),
             'STATUS ACESSO':    status,
             'FATURA':           fat['num'],
+            'STATUS 1ª FATURA': st1 or '',
+            'STATUS 2ª FATURA': st2 or '',
             'VALOR':            fat['valor'],
             'VENCIMENTO':       fat['vencimento'],
             'DIAS ATRASO':      fat['dias'],
@@ -220,7 +241,7 @@ def processar_arquivo(uploaded_file, safra: str):
             'ETAPA':            et,
             'ENVIO':            None,
             'ULTIMO ENVIO':     None,
-            'STATUS PAGAMENTO': None,
+            'STATUS PAGAMENTO': status_pag,
         })
 
     df_ctrl = pd.DataFrame(rows)
