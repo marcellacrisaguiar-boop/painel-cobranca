@@ -5,7 +5,8 @@ from datetime import date, datetime
 import io
 
 from processamento import (processar_arquivo, calcular_resumo,
-                            carregar_conectadas_de_bytes, conectadas_carregado)
+                            carregar_conectadas_de_bytes, conectadas_carregado,
+                            get_data_upload_conectadas)
 from banco import (carregar_controle, salvar_controle, carregar_historico,
                    atualizar_banco, registrar_envio,
                    carregar_snapshots, salvar_snapshot)
@@ -109,16 +110,23 @@ with st.sidebar:
     # CONECTADAS
     st.markdown("### 🔗 Base CONECTADAS")
     if conectadas_carregado():
-        st.markdown('<div class="ok-box">✅ CONECTADAS carregado</div>', unsafe_allow_html=True)
+        data_up = get_data_upload_conectadas()
+        info = f'✅ CONECTADAS carregado<br><small style="opacity:.7">Upload: {data_up}</small>' if data_up else '✅ CONECTADAS carregado'
+        st.markdown(f'<div class="ok-box">{info}</div>', unsafe_allow_html=True)
+        if st.button("🔄 Atualizar CONECTADAS", use_container_width=True):
+            resetar_conectadas()
+            st.rerun()
     else:
         st.markdown('<div class="warn-box">⚠️ Carregar CONECTADAS</div>', unsafe_allow_html=True)
-        con_up = st.file_uploader("CONECTADAS (.xlsx/.xls)", type=['xlsx','xls'],
-                                   key='con_up', label_visibility='collapsed')
-        if con_up:
-            if carregar_conectadas_de_bytes(con_up.read(), con_up.name):
-                st.success("✅ Carregado!"); st.rerun()
-            else:
-                st.error("Erro ao carregar")
+
+    con_up = st.file_uploader("CONECTADAS (.xlsx/.xls)", type=['xlsx','xls'],
+                               key='con_up', label_visibility='collapsed')
+    if con_up:
+        if carregar_conectadas_de_bytes(con_up.read(), con_up.name):
+            st.markdown('<div class="ok-box">✅ Carregado!</div>', unsafe_allow_html=True)
+            st.rerun()
+        else:
+            st.error("Erro ao carregar CONECTADAS")
 
     st.markdown("---")
 
@@ -201,9 +209,9 @@ st.markdown(f"<small style='color:#3B4163'>Safras: {' · '.join(safras_at) or 'N
             unsafe_allow_html=True)
 st.markdown("---")
 
-tab1,tab2,tab3,tab4 = st.tabs([
+tab1,tab2,tab3,tab4,tab5 = st.tabs([
     "🎯  Controle de Envio","📈  Resumo & Funil",
-    "💰  Histórico de Pagamentos","⚙️  Tabela de Fluxo"])
+    "💰  Histórico de Pagamentos","📲  Envios do Dia","⚙️  Tabela de Fluxo"])
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TAB 1 — CONTROLE DE ENVIO
@@ -282,18 +290,23 @@ with tab1:
                                mime='text/csv',use_container_width=True)
 
         COLS=['SAFRA','NOME','NUMERO PORTADO','NUMERO LINHA',
-              'FATURA','VALOR','VENCIMENTO','DIAS ATRASO',
+              'FATURA','STATUS 1ª FATURA','STATUS 2ª FATURA',
+              'VALOR','VENCIMENTO','DIAS ATRASO',
               'PORTABILIDADE','ETAPA','ENVIO','ULTIMO ENVIO','STATUS PAGAMENTO']
         df_d = df_f[[c for c in COLS if c in df_f.columns]].copy()
         if 'VALOR' in df_d.columns:
             df_d['VALOR'] = pd.to_numeric(df_d['VALOR'],errors='coerce')
         if 'VENCIMENTO' in df_d.columns:
             df_d['VENCIMENTO'] = pd.to_datetime(df_d['VENCIMENTO'],errors='coerce').dt.strftime('%d/%m/%Y')
+        # Limpar None → vazio
+        df_d = df_d.replace({None: '', 'None': ''})
 
         st.dataframe(df_d,use_container_width=True,height=420,hide_index=True,
                      column_config={
-                         'VALOR':      st.column_config.NumberColumn('Valor',format="R$ %.2f"),
-                         'DIAS ATRASO':st.column_config.NumberColumn('Dias'),
+                         'VALOR':         st.column_config.NumberColumn('Valor',format="R$ %.2f"),
+                         'DIAS ATRASO':   st.column_config.NumberColumn('Dias'),
+                         'STATUS 1ª FATURA': st.column_config.TextColumn('St. 1ª Fat.'),
+                         'STATUS 2ª FATURA': st.column_config.TextColumn('St. 2ª Fat.'),
                      })
 
         with st.expander("📝 Registrar envio realizado"):
@@ -382,7 +395,7 @@ with tab2:
 
             with c1:
                 st.markdown(mc("Gross", f"{N:,}",
-                               sub=f"Ativos: {NA:,} | Canc: {NC:,}",
+                               sub=f"✅ Ativos: {NA:,} ({pct(NA,N)})  ❌ Canc: {NC:,} ({pct(NC,N)})",
                                tipo='azul'), unsafe_allow_html=True)
             with c2:
                 st.markdown(mc("% Estorno Atual",
@@ -521,9 +534,165 @@ with tab3:
                            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TAB 4 — TABELA DE FLUXO
+# TAB 4 — ENVIOS DO DIA
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 with tab4:
+    import requests as _req
+    WEBHOOK_URL = os.getenv('N8N_WEBHOOK_URL', '')
+
+    # Mapeamento etapa → HSM (configurar no Streamlit Cloud Secrets)
+    HSM_MAP = {
+        'Preventivo': os.getenv('HSM_PREVENTIVO', 'hsm_preventivo'),
+        'Etapa 1':    os.getenv('HSM_ETAPA1',     'hsm_etapa1'),
+        'Etapa 2':    os.getenv('HSM_ETAPA2',     'hsm_etapa2'),
+        'Etapa 3':    os.getenv('HSM_ETAPA3',     'hsm_etapa3'),
+        'Etapa 4':    os.getenv('HSM_ETAPA4',     'hsm_etapa4'),
+        'Etapa 5':    os.getenv('HSM_ETAPA5',     'hsm_etapa5'),
+        'Etapa 6':    os.getenv('HSM_ETAPA6',     'hsm_etapa6'),
+        'Etapa 7':    os.getenv('HSM_ETAPA7',     'hsm_etapa7'),
+        'Etapa 8':    os.getenv('HSM_ETAPA8',     'hsm_etapa8'),
+    }
+
+    st.markdown("### 📲 Envios do Dia")
+    st.markdown("<small style='color:#3B4163'>Clientes que devem receber mensagem hoje, agrupados por etapa</small>",
+                unsafe_allow_html=True)
+
+    if df is None or len(df) == 0:
+        st.info("Carregue um arquivo de safra para ver os envios do dia.")
+    else:
+        hoje = date.today()
+        df_envio = df[df['ETAPA'].notna()].copy()
+        df_envio['_ULT_DT'] = pd.to_datetime(df_envio.get('ULTIMO ENVIO', None), errors='coerce').dt.date
+        df_envio_hoje = df_envio[
+            df_envio['_ULT_DT'].isna() | (df_envio['_ULT_DT'] < hoje)
+        ].copy()
+
+        por_etapa = df_envio_hoje['ETAPA'].value_counts()
+        total_hoje = len(df_envio_hoje)
+        prev_n = int(por_etapa.get('Preventivo', 0))
+
+        c1,c2,c3 = st.columns(3)
+        with c1: st.markdown(mc('A enviar hoje', f'{total_hoje:,}', tipo='azul'), unsafe_allow_html=True)
+        with c2: st.markdown(mc('Preventivos', f'{prev_n:,}', tipo='verde'), unsafe_allow_html=True)
+        with c3: st.markdown(mc('Em atraso (E1+)', f'{total_hoje - prev_n:,}', tipo='verm'), unsafe_allow_html=True)
+
+        st.markdown('---')
+
+        # Webhook e HSMs configurados via Streamlit Secrets — sem necessidade de digitar
+        if not WEBHOOK_URL:
+            st.warning("⚠️ Webhook n8n não configurado. Adicione N8N_WEBHOOK_URL nos Secrets do Streamlit Cloud.")
+        else:
+            st.markdown(f'<div class="ok-box">✅ Webhook configurado · HSMs mapeados por etapa</div>',
+                        unsafe_allow_html=True)
+
+        st.markdown('---')
+
+        for etapa in ETAPA_ORDER:
+            df_et = df_envio_hoje[df_envio_hoje['ETAPA'] == etapa]
+            if len(df_et) == 0:
+                continue
+
+            cor = ETAPA_COR.get(etapa, '#fff')
+            col_hdr, col_btn = st.columns([3, 1])
+            with col_hdr:
+                st.markdown(
+                    f"<div style='display:flex;align-items:center;gap:10px;margin:.8rem 0 .4rem'>"
+                    f"<div style='width:10px;height:10px;border-radius:50%;background:{cor}'></div>"
+                    f"<span style='font-weight:600;color:#E8EAF0'>{etapa}</span>"
+                    f"<span style='color:#3B4163;font-size:.82rem'>{len(df_et):,} clientes</span>"
+                    f"</div>", unsafe_allow_html=True)
+            with col_btn:
+                if st.button(f'📲 Disparar {etapa}', key=f'btn_{etapa}', use_container_width=True):
+                    if not WEBHOOK_URL:
+                        st.error('Configure a URL do webhook n8n antes de disparar.')
+                    else:
+                        # Montar payload — 1 registro por cliente com os 2 números
+                        # e parâmetros HSM: numero (TELEFONE_PORTADO), nome, valor, vencimento
+                        def _fmt_v(v):
+                            try: return f"R$ {float(v):,.2f}".replace(",","X").replace(".",",").replace("X",".")
+                            except: return str(v) if v else ""
+                        def _fmt_d(v):
+                            try: return pd.to_datetime(v, errors="coerce").strftime("%d/%m/%Y")
+                            except: return str(v) if v else ""
+
+                        records = []
+                        for _, r in df_et.iterrows():
+                            tel_portado = str(r.get("NUMERO PORTADO", "") or "").strip()
+                            num_linha   = str(r.get("NUMERO LINHA",   "") or "").strip()
+                            nome        = str(r.get("NOME", "") or "").strip()
+                            valor_fmt   = _fmt_v(r.get("VALOR"))
+                            venc_fmt    = _fmt_d(r.get("VENCIMENTO"))
+
+                            records.append({
+                                # Identificação
+                                "CPF":            str(r.get("CPF", "") or ""),
+                                "SAFRA":          str(r.get("SAFRA", "") or ""),
+                                "ETAPA":          etapa,
+                                "HSM":            HSM_MAP.get(etapa, ""),
+                                "PORTABILIDADE":  str(r.get("PORTABILIDADE", "") or ""),
+                                "FATURA":         int(r.get("FATURA", 1) or 1),
+                                "DIAS_ATRASO":    int(r.get("DIAS ATRASO", 0) or 0),
+
+                                # Dois números para disparo
+                                "TELEFONE_PORTADO": tel_portado,
+                                "NUMERO_LINHA":     num_linha,
+
+                                # Parâmetros variáveis da HSM
+                                "hsm_numero":     tel_portado,   # número de referência
+                                "hsm_nome":       nome,
+                                "hsm_valor":      valor_fmt,
+                                "hsm_vencimento": venc_fmt,
+                            })
+                        try:
+                            with st.spinner(f'Enviando {len(records)} clientes para o n8n...'):
+                                resp = _req.post(WEBHOOK_URL,
+                                    json={
+                                        'etapa':  etapa,
+                                        'hsm':    HSM_MAP.get(etapa, ''),
+                                        'total':  len(records),
+                                        'data':   str(hoje),
+                                        'clientes': records,
+                                    },
+                                    timeout=30)
+                            if resp.status_code in (200, 201):
+                                mask = st.session_state.df_ctrl['ETAPA'] == etapa
+                                st.session_state.df_ctrl.loc[mask, 'ULTIMO ENVIO'] = hoje
+                                salvar_controle(st.session_state.df_ctrl)
+                                st.success(f'✅ {len(records)} clientes enviados! ({etapa})')
+                                st.rerun()
+                            else:
+                                st.error(f'Erro webhook: {resp.status_code} — {resp.text[:200]}')
+                        except Exception as e:
+                            st.error(f'Erro ao chamar webhook: {e}')
+
+            cols_show = ['NOME','NUMERO PORTADO','NUMERO LINHA','FATURA',
+                         'STATUS 1ª FATURA','STATUS 2ª FATURA',
+                         'VALOR','VENCIMENTO','DIAS ATRASO','PORTABILIDADE']
+            df_show = df_et[[c for c in cols_show if c in df_et.columns]].copy()
+            if 'VALOR' in df_show.columns:
+                df_show['VALOR'] = pd.to_numeric(df_show['VALOR'], errors='coerce')
+            if 'VENCIMENTO' in df_show.columns:
+                df_show['VENCIMENTO'] = pd.to_datetime(
+                    df_show['VENCIMENTO'], errors='coerce').dt.strftime('%d/%m/%Y')
+            df_show = df_show.replace({None: '', 'None': ''})
+            st.dataframe(df_show, use_container_width=True,
+                         height=min(250, 38 + len(df_show)*35),
+                         hide_index=True,
+                         column_config={
+                             'VALOR': st.column_config.NumberColumn('Valor', format='R$ %.2f'),
+                             'DIAS ATRASO': st.column_config.NumberColumn('Dias'),
+                         })
+            csv_et = exportar_wpp(df_et)
+            st.download_button(f'⬇️ Baixar lista {etapa}',
+                               data=csv_et.encode('utf-8-sig'),
+                               file_name=f'{etapa.lower().replace(" ","_")}_{hoje}.csv',
+                               mime='text/csv', key=f'dl_{etapa}')
+            st.markdown('<hr style="margin:.6rem 0;opacity:.15">', unsafe_allow_html=True)
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TAB 4 — TABELA DE FLUXO
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+with tab5:
     st.markdown("### Funil de Cobrança — Regras de Envio")
     fluxo=[
         ("D-2 antes do vencimento","Preventivo","Lembrete","Todos","🟢"),
