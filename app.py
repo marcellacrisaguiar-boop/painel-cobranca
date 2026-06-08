@@ -1,3 +1,5 @@
+import os
+import os as _os
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -15,8 +17,6 @@ from banco import (carregar_controle, salvar_controle, carregar_historico,
 # ENDPOINT WEBHOOK — recebe bloqueio do n8n quando cliente clica em BLOQUEAR
 # Chamada: GET/POST ?action=bloquear&telefone=11987654321&token=SEU_TOKEN
 # ══════════════════════════════════════════════════════════════════════════════
-import os as _os
-import os
 _WEBHOOK_TOKEN = _os.getenv('WEBHOOK_TOKEN', '')
 
 _params = st.query_params
@@ -586,9 +586,14 @@ with tab4:
     else:
         hoje = date.today()
         df_envio = df[df['ETAPA'].notna()].copy()
-        df_envio['_ULT_DT'] = pd.to_datetime(df_envio.get('ULTIMO ENVIO', None), errors='coerce').dt.date
+        # Converter ULTIMO ENVIO para date com segurança (pode vir como string do Supabase)
+        df_envio['_ULT_DT'] = pd.to_datetime(
+            df_envio['ULTIMO ENVIO'] if 'ULTIMO ENVIO' in df_envio.columns else None,
+            errors='coerce'
+        ).dt.date
         df_envio_hoje = df_envio[
-            df_envio['_ULT_DT'].isna() | (df_envio['_ULT_DT'] < hoje)
+            df_envio['_ULT_DT'].isna() |
+            (df_envio['_ULT_DT'].apply(lambda d: d < hoje if d is not None else True))
         ].copy()
 
         por_etapa = df_envio_hoje['ETAPA'].value_counts()
