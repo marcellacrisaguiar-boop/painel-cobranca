@@ -166,6 +166,7 @@ with st.sidebar:
     if uploaded and st.button("⚡ Processar e Atualizar", use_container_width=True):
         with st.spinner("Processando..."):
             try:
+                garantir_conectadas()  # garante cache antes de processar
                 df_novo, res_novo = processar_arquivo(uploaded, safra_sel)
                 df_upd, df_hist_new = atualizar_banco(
                     st.session_state.df_ctrl, df_novo, safra_sel)
@@ -325,6 +326,8 @@ with tab1:
             df_d['VALOR'] = pd.to_numeric(df_d['VALOR'],errors='coerce')
         if 'VENCIMENTO' in df_d.columns:
             df_d['VENCIMENTO'] = pd.to_datetime(df_d['VENCIMENTO'],errors='coerce').dt.strftime('%d/%m/%Y')
+        # Limpar nan e None
+        df_d = df_d.fillna('').replace('nan','').replace('None','')
         # Limpar None → vazio
         df_d = df_d.replace({None: '', 'None': ''})
 
@@ -590,13 +593,13 @@ with tab4:
         hoje = date.today()
         df_envio = df[df['ETAPA'].notna()].copy()
         # Converter ULTIMO ENVIO para date com segurança (pode vir como string do Supabase)
-        df_envio['_ULT_DT'] = pd.to_datetime(
-            df_envio['ULTIMO ENVIO'] if 'ULTIMO ENVIO' in df_envio.columns else None,
-            errors='coerce'
-        ).dt.date
+        if 'ULTIMO ENVIO' in df_envio.columns:
+            df_envio['_ULT_DT'] = pd.to_datetime(df_envio['ULTIMO ENVIO'], errors='coerce').dt.date
+        else:
+            df_envio['_ULT_DT'] = None
         df_envio_hoje = df_envio[
             df_envio['_ULT_DT'].isna() |
-            (df_envio['_ULT_DT'].apply(lambda d: d < hoje if d is not None else True))
+            df_envio['_ULT_DT'].apply(lambda d: d < hoje if pd.notna(d) and d is not None else True)
         ].copy()
 
         por_etapa = df_envio_hoje['ETAPA'].value_counts()
