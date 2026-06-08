@@ -1,5 +1,6 @@
 """
 processamento.py — Lê arquivo bruto da safra, aplica filtros e regras de negócio.
+CONECTADAS e SAFRAS são persistidas no Supabase.
 """
 
 import pandas as pd
@@ -7,71 +8,35 @@ from datetime import date, datetime
 import os
 from pathlib import Path
 
-# ── Cache do CONECTADAS ───────────────────────────────────────────────────────
+# ── Cache em memória (evita re-carregar a cada interação) ─────────────────────
 _PORT_CACHE = {}
 _CONECTADAS_DATA_UPLOAD = None
 
 def get_data_upload_conectadas():
     return _CONECTADAS_DATA_UPLOAD
 
-def _carregar_conectadas(extra_path=None):
-    """
-    Procura CONECTADAS.xlsx/.xls em vários locais possíveis.
-    extra_path: caminho adicional passado pelo app (ex: upload manual).
-    """
-    global _PORT_CACHE
-    if _PORT_CACHE:
-        return _PORT_CACHE
+def conectadas_carregado():
+    return bool(_PORT_CACHE)
 
-    # Locais para procurar — do mais específico ao mais genérico
-    candidates = []
-    if extra_path:
-        candidates.append(Path(extra_path))
+def _get_sb():
+    from supabase import create_client
+    url = os.getenv('SUPABASE_URL','')
+    key = os.getenv('SUPABASE_KEY','')
+    if not url or not key:
+        return None
+    return create_client(url, key)
 
-    script_dir = Path(__file__).resolve().parent
-    cwd        = Path(os.getcwd())
-
-    for folder in [script_dir, cwd, cwd.parent]:
-        for name in ['CONECTADAS.xlsx', 'CONECTADAS.xls', 'conectadas.xlsx', 'conectadas.xls']:
-            candidates.append(folder / name)
-
-    for path in candidates:
-        if path.exists():
-            try:
-                engine = 'xlrd' if str(path).endswith('.xls') else 'openpyxl'
-                con = pd.read_excel(str(path), engine=engine)
-                con['NUM_STR'] = con['NUMERO_LINHA'].fillna(0).astype(int).astype(str).str.strip()
-                con['TEL_STR'] = con['TELEFONE_PORTADO'].fillna(0).astype(int).astype(str).str.strip()
-                _PORT_CACHE = {
-                    'nome':  {**con.set_index('TEL_STR')['NOME'].to_dict(),
-                               **con.set_index('NUM_STR')['NOME'].to_dict()},
-                    'tel':   {**con.set_index('TEL_STR')['TELEFONE_PORTADO'].to_dict(),
-                               **con.set_index('NUM_STR')['TELEFONE_PORTADO'].to_dict()},
-                    'linha': {**con.set_index('TEL_STR')['NUMERO_LINHA'].to_dict(),
-                               **con.set_index('NUM_STR')['NUMERO_LINHA'].to_dict()},
-                    'port':  {**con.set_index('TEL_STR')['PORTABILIDADE'].to_dict(),
-                               **con.set_index('NUM_STR')['PORTABILIDADE'].to_dict()},
-                }
-                global _CONECTADAS_DATA_UPLOAD
-                from datetime import datetime
-                _CONECTADAS_DATA_UPLOAD = datetime.now().strftime('%d/%m/%Y %H:%M')
-                print(f"[CONECTADAS] ✓ Carregado: {path} ({len(con)} registros)")
-                return _PORT_CACHE
-            except Exception as e:
-                print(f"[CONECTADAS] Erro em {path}: {e}")
-
-    print(f"[CONECTADAS] Não encontrado. Procurei em: {[str(c) for c in candidates[:6]]}")
-    return {}
-
-def carregar_conectadas_de_bytes(file_bytes, filename):
-    """Carrega CONECTADAS a partir de bytes (upload via Streamlit)."""
-    global _PORT_CACHE
+# ── Carregar CONECTADAS do Supabase ───────────────────────────────────────────
+def _carregar_conectadas_supabase():
+    global _PORT_CACHE, _CONECTADAS_DATA_UPLOAD
     try:
-        import io
-        engine = 'xlrd' if filename.lower().endswith('.xls') else 'openpyxl'
-        con = pd.read_excel(io.BytesIO(file_bytes), engine=engine)
-        con['NUM_STR'] = con['NUMERO_LINHA'].fillna(0).astype(int).astype(str).str.strip()
-        con['TEL_STR'] = con['TELEFONE_PORTADO'].fillna(0).astype(int).astype(str).str.strip()
+        sb = _get_sb()
+        if not sb: return False
+        res = sb.table('conectadas').select('*').execute()
+        if not res.data: return False
+        con = pd.DataFrame(res.data)
+        con['NUM_STR'] = con['NUMERO_LINHA'].fillna('').astype(str).str.strip()
+        con['TEL_STR'] = con['TELEFONE_PORTADO'].fillna('').astype(str).str.strip()
         _PORT_CACHE = {
             'nome':  {**con.set_index('TEL_STR')['NOME'].to_dict(),
                        **con.set_index('NUM_STR')['NOME'].to_dict()},
@@ -82,22 +47,66 @@ def carregar_conectadas_de_bytes(file_bytes, filename):
             'port':  {**con.set_index('TEL_STR')['PORTABILIDADE'].to_dict(),
                        **con.set_index('NUM_STR')['PORTABILIDADE'].to_dict()},
         }
-        global _CONECTADAS_DATA_UPLOAD
-        from datetime import datetime
         _CONECTADAS_DATA_UPLOAD = datetime.now().strftime('%d/%m/%Y %H:%M')
-        print(f"[CONECTADAS] ✓ Carregado via upload: {len(con)} registros")
+        print(f"[CONECTADAS] ✓ Carregado do Supabase: {len(con)} registros")
         return True
     except Exception as e:
-        print(f"[CONECTADAS] Erro no upload: {e}")
+        print(f"[CONECTADAS] Erro Supabase: {e}")
         return False
 
-def conectadas_carregado():
-    return bool(_PORT_CACHE)
+def _build_cache(con: pd.DataFrame):
+    global _PORT_CACHE, _CONECTADAS_DATA_UPLOAD
+    con['NUM_STR'] = con['NUMERO_LINHA'].fillna('').astype(str).str.strip()
+    con['TEL_STR'] = con['TELEFONE_PORTADO'].fillna('').astype(str).str.strip()
+    _PORT_CACHE = {
+        'nome':  {**con.set_index('TEL_STR')['NOME'].to_dict(),
+                   **con.set_index('NUM_STR')['NOME'].to_dict()},
+        'tel':   {**con.set_index('TEL_STR')['TELEFONE_PORTADO'].to_dict(),
+                   **con.set_index('NUM_STR')['TELEFONE_PORTADO'].to_dict()},
+        'linha': {**con.set_index('TEL_STR')['NUMERO_LINHA'].to_dict(),
+                   **con.set_index('NUM_STR')['NUMERO_LINHA'].to_dict()},
+        'port':  {**con.set_index('TEL_STR')['PORTABILIDADE'].to_dict(),
+                   **con.set_index('NUM_STR')['PORTABILIDADE'].to_dict()},
+    }
+    _CONECTADAS_DATA_UPLOAD = datetime.now().strftime('%d/%m/%Y %H:%M')
 
-def resetar_conectadas():
-    """Limpa o cache para forçar recarregamento de uma nova versão do CONECTADAS."""
-    global _PORT_CACHE
-    _PORT_CACHE = {}
+def carregar_conectadas_de_bytes(file_bytes, filename):
+    """Upload manual via painel — salva no Supabase e atualiza cache."""
+    global _PORT_CACHE, _CONECTADAS_DATA_UPLOAD
+    try:
+        import io
+        engine = 'xlrd' if filename.lower().endswith('.xls') else 'openpyxl'
+        con = pd.read_excel(io.BytesIO(file_bytes), engine=engine)
+
+        # Salvar no Supabase
+        sb = _get_sb()
+        if sb:
+            try:
+                # Selecionar só colunas necessárias
+                cols = ['NOME','TELEFONE_PORTADO','NUMERO_LINHA','PORTABILIDADE']
+                if 'CPF' in con.columns: cols = ['CPF'] + cols
+                con_save = con[[c for c in cols if c in con.columns]].copy()
+                con_save = con_save.where(pd.notnull(con_save), None)
+                # Limpar e recarregar
+                sb.table('conectadas').delete().neq('id', 0).execute()
+                records = con_save.to_dict('records')
+                for i in range(0, len(records), 500):
+                    sb.table('conectadas').insert(records[i:i+500]).execute()
+                print(f"[CONECTADAS] ✓ Salvo no Supabase: {len(records)} registros")
+            except Exception as e:
+                print(f"[CONECTADAS] Erro ao salvar no Supabase: {e}")
+
+        _build_cache(con)
+        print(f"[CONECTADAS] ✓ Cache atualizado: {len(con)} registros")
+        return True
+    except Exception as e:
+        print(f"[CONECTADAS] Erro upload: {e}")
+        return False
+
+def garantir_conectadas():
+    """Garante que o cache está carregado — tenta Supabase se vazio."""
+    if not _PORT_CACHE:
+        _carregar_conectadas_supabase()
 
 def _fmt_num(v):
     try:    return str(int(float(v))) if v else ''
@@ -148,12 +157,12 @@ def _fatura_urgente(row):
         if st != 'Aberta': continue
         vr = row.get(f'{n} fatura - Data de vencimento')
         try:
-            if isinstance(vr, str):          venc = datetime.strptime(vr,'%d/%m/%Y').date()
-            elif isinstance(vr, datetime):    venc = vr.date()
-            elif isinstance(vr, date):        venc = vr
-            else:                             continue
+            if isinstance(vr, str):       venc = datetime.strptime(vr,'%d/%m/%Y').date()
+            elif isinstance(vr, datetime): venc = vr.date()
+            elif isinstance(vr, date):     venc = vr
+            else:                          continue
         except: continue
-        val_raw = str(row.get(f'{n} fatura - Preço da fatura') or '') \
+        val_raw = str(row.get(f'{n} fatura - Preço da fatura') or '')\
                       .replace('R$','').replace(',','.').strip()
         try:    val = float(val_raw)
         except: val = None
@@ -164,6 +173,9 @@ def _fatura_urgente(row):
     return {'num':num, 'valor':val, 'vencimento':venc, 'dias':(today-venc).days}
 
 def processar_arquivo(uploaded_file, safra: str):
+    garantir_conectadas()
+    con = _PORT_CACHE
+
     # Ler arquivo
     name = uploaded_file.name.lower()
     if name.endswith('.csv'):
@@ -187,41 +199,37 @@ def processar_arquivo(uploaded_file, safra: str):
             (df['1ª fatura - Data de vencimento'].dt.to_period('M') <
              df['Data da ativação'].dt.to_period('M')))
     df = df[~mask].copy()
-
     df['Status do número de acesso'] = df['Status do número de acesso'].str.strip()
 
-    # PORTIN
-    con = _carregar_conectadas()
     def get_port(num):
         v = con.get('port',{}).get(_fmt_num(num))
         return v if v and not (isinstance(v,float) and pd.isna(v)) else 0
-    df['PORTIN'] = df['Número de acesso'].apply(get_port)
 
-    # STATUS ESTORNO
+    df['PORTIN'] = df['Número de acesso'].apply(get_port)
     df['STATUS ESTORNO'] = df['1ª fatura - Data de vencimento'].apply(
         lambda v: _status_estorno(v, safra))
+
+    # Salvar safra no Supabase
+    _salvar_safra_supabase(df, safra)
 
     # Construir controle — somente ATIVOS com fatura aberta
     rows = []
     for _, row in df.iterrows():
         status = str(row.get('Status do número de acesso') or '').strip()
-
-        # Contabilizar cancelados no resumo mas NÃO na lista de cobrança
         fat = _fatura_urgente(row) if status == 'Ativo' else None
         if not fat: continue
 
         portin = str(row.get('PORTIN') or '')
         et     = calcular_etapa(fat['dias'], portin)
         na     = _fmt_num(row.get('Número de acesso',''))
+        st1    = str(row.get('1ª fatura - Status da fatura') or '').strip()
+        st2    = str(row.get('2ª fatura - Status da fatura') or '').strip()
+        status_pag = st1 if fat['num'] == 1 else st2
 
-        if portin == 'Portabilidade Concluida':    port_label = 'Concluida'
+        if portin == 'Portabilidade Concluida':   port_label = 'Concluida'
         elif portin not in ('','0',0):             port_label = 'Nao Concluida'
         else:                                      port_label = ''
 
-        st1 = str(row.get('1ª fatura - Status da fatura') or '').strip()
-        st2 = str(row.get('2ª fatura - Status da fatura') or '').strip()
-        # Status de pagamento = status real da fatura mais urgente
-        status_pag = st1 if fat['num'] == 1 else st2
         rows.append({
             'SAFRA':            safra,
             'CPF':              str(row.get('Cpf','') or ''),
@@ -232,8 +240,8 @@ def processar_arquivo(uploaded_file, safra: str):
             'NUMERO LINHA':     _fmt_num(con.get('linha',{}).get(na,'')),
             'STATUS ACESSO':    status,
             'FATURA':           fat['num'],
-            'STATUS 1ª FATURA': st1 or '',
-            'STATUS 2ª FATURA': st2 or '',
+            'STATUS 1ª FATURA': st1,
+            'STATUS 2ª FATURA': st2,
             'VALOR':            fat['valor'],
             'VENCIMENTO':       fat['vencimento'],
             'DIAS ATRASO':      fat['dias'],
@@ -245,34 +253,58 @@ def processar_arquivo(uploaded_file, safra: str):
         })
 
     df_ctrl = pd.DataFrame(rows)
-
-    # Resumo usa df completo (inclusive cancelados)
-    resumo = calcular_resumo_base(df, safra)
+    resumo   = calcular_resumo_base(df, safra)
     return df_ctrl, resumo
 
-def calcular_resumo_base(df_base: pd.DataFrame, safra: str) -> dict:
-    """Resumo analítico a partir do dataframe bruto filtrado."""
-    if df_base is None or len(df_base) == 0:
-        return _empty_resumo()
+def _salvar_safra_supabase(df: pd.DataFrame, safra: str):
+    """Salva/atualiza registros da safra no Supabase."""
+    try:
+        sb = _get_sb()
+        if not sb: return
+        # Remover registros antigos desta safra e reinserir
+        sb.table('safras').delete().eq('"SAFRA"', safra).execute()
+        cols_map = {
+            'Cpf': 'CPF',
+            'Número de acesso': 'NUMERO DE ACESSO',
+            'Status do número de acesso': 'STATUS DO ACESSO',
+            'Data da ativação': 'DATA DA ATIVACAO',
+            '1ª fatura - Status da fatura': 'STATUS 1 FATURA',
+            '1ª fatura - Data de vencimento': 'VENCIMENTO 1 FATURA',
+            '1ª fatura - Preço da fatura': 'VALOR 1 FATURA',
+            '2ª fatura - Status da fatura': 'STATUS 2 FATURA',
+            '2ª fatura - Data de vencimento': 'VENCIMENTO 2 FATURA',
+            '2ª fatura - Preço da fatura': 'VALOR 2 FATURA',
+            'STATUS ESTORNO': 'STATUS ESTORNO',
+            'PORTIN': 'PORTIN',
+        }
+        df_save = df[[c for c in cols_map.keys() if c in df.columns]].rename(columns=cols_map).copy()
+        df_save['SAFRA'] = safra
+        # Converter datas
+        for col in ['DATA DA ATIVACAO','VENCIMENTO 1 FATURA','VENCIMENTO 2 FATURA']:
+            if col in df_save.columns:
+                df_save[col] = pd.to_datetime(df_save[col], errors='coerce').dt.strftime('%Y-%m-%d')
+        records = df_save.where(pd.notnull(df_save), None).to_dict('records')
+        for i in range(0, len(records), 500):
+            sb.table('safras').insert(records[i:i+500]).execute()
+        print(f"[SAFRAS] ✓ {safra}: {len(records)} registros salvos")
+    except Exception as e:
+        print(f"[SAFRAS] Erro ao salvar: {e}")
 
+def calcular_resumo_base(df_base: pd.DataFrame, safra: str) -> dict:
+    if df_base is None or len(df_base) == 0: return _empty_resumo()
     PC = 'Portabilidade Concluida'
     ip  = lambda p: p == PC
     is_ = lambda p: p != PC
-
-    if 'PORTIN' not in df_base.columns:
-        return _empty_resumo()
-
-    df_at = df_base[df_base['Status do número de acesso'] == 'Ativo']
-    df_in = df_base[df_base['Status do número de acesso'] != 'Ativo']
+    if 'PORTIN' not in df_base.columns: return _empty_resumo()
+    df_at = df_base[df_base['Status do número de acesso']=='Ativo']
+    df_in = df_base[df_base['Status do número de acesso']!='Ativo']
     N=len(df_base); NA=len(df_at); NC=len(df_in)
     PF=int(df_base['PORTIN'].apply(ip).sum()); SF=int(df_base['PORTIN'].apply(is_).sum())
-    PA=int(df_at['PORTIN'].apply(ip).sum());   SA=int(df_at['PORTIN'].apply(is_).sum())
-    PC_=int(df_in['PORTIN'].apply(ip).sum());  SC=int(df_in['PORTIN'].apply(is_).sum())
-
+    PA=int(df_at['PORTIN'].apply(ip).sum()); SA=int(df_at['PORTIN'].apply(is_).sum())
+    PC_=int(df_in['PORTIN'].apply(ip).sum()); SC=int(df_in['PORTIN'].apply(is_).sum())
     CATS=['SEM ESTORNO','1 FATURA PAGA','1 FATURA ABERTA','2 FATURAS - 2 PGS',
           '2 FATURAS (2 ABERTA)','2 FATURAS (1 PAGA 2 ABERTA)','2 FATURAS ( 1 ABERTO 2 PAGA']
     SIM={'1 FATURA ABERTA','2 FATURAS (2 ABERTA)','2 FATURAS (1 PAGA 2 ABERTA)','2 FATURAS ( 1 ABERTO 2 PAGA'}
-
     def sit(row):
         se=str(row.get('STATUS ESTORNO') or '')
         if se=='SEM ESTORNO': return 'SEM ESTORNO'
@@ -288,7 +320,6 @@ def calcular_resumo_base(df_base: pd.DataFrame, safra: str) -> dict:
             if f1p: return '1 FATURA PAGA'
             if f1a: return '1 FATURA ABERTA'
         return 'SEM ESTORNO'
-
     db=df_base.copy(); db['_S']=db.apply(sit,axis=1)
     da=db[db['Status do número de acesso']=='Ativo']
     rows=[]
@@ -302,10 +333,8 @@ def calcular_resumo_base(df_base: pd.DataFrame, safra: str) -> dict:
     return dict(safra=safra,N=N,NA=NA,NC=NC,PF=PF,SF=SF,PA=PA,SA=SA,PC_=PC_,SC=SC,
                 rows=rows,ET=ET,EP=EP,ES=ES,CT=ET,CP=EP,CS=ES,META=META,MV=MV,RV=RV)
 
-def calcular_resumo(df: pd.DataFrame) -> dict:
-    """Resumo a partir do df de controle (já processado)."""
-    if df is None or len(df) == 0: return _empty_resumo()
-    def _p(a,b): return a/b if b else 0
+def calcular_resumo(df):
+    if df is None or len(df)==0: return _empty_resumo()
     N=len(df)
     NA=int((df['STATUS ACESSO']=='Ativo').sum()) if 'STATUS ACESSO' in df.columns else N
     NC=N-NA

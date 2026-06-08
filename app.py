@@ -8,7 +8,7 @@ import io
 
 from processamento import (processar_arquivo, calcular_resumo,
                             carregar_conectadas_de_bytes, conectadas_carregado,
-                            get_data_upload_conectadas)
+                            get_data_upload_conectadas, garantir_conectadas)
 from banco import (carregar_controle, salvar_controle, carregar_historico,
                    atualizar_banco, registrar_envio, registrar_bloqueio,
                    carregar_snapshots, salvar_snapshot)
@@ -121,6 +121,9 @@ if 'df_ctrl' not in st.session_state: st.session_state.df_ctrl = carregar_contro
 if 'df_hist' not in st.session_state: st.session_state.df_hist = carregar_historico()
 if 'resumos' not in st.session_state: st.session_state.resumos = {}
 if 'snaps'   not in st.session_state: st.session_state.snaps   = carregar_snapshots()
+
+# Garantir CONECTADAS carregado do Supabase ao iniciar
+garantir_conectadas()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
