@@ -140,9 +140,6 @@ with st.sidebar:
         data_up = get_data_upload_conectadas()
         info = f'✅ CONECTADAS carregado<br><small style="opacity:.7">Upload: {data_up}</small>' if data_up else '✅ CONECTADAS carregado'
         st.markdown(f'<div class="ok-box">{info}</div>', unsafe_allow_html=True)
-        if st.button("🔄 Atualizar CONECTADAS", use_container_width=True):
-            resetar_conectadas()
-            st.rerun()
     else:
         st.markdown('<div class="warn-box">⚠️ Carregar CONECTADAS</div>', unsafe_allow_html=True)
 
