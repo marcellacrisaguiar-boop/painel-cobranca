@@ -34,7 +34,8 @@ def _carregar_conectadas(extra_path=None):
     for path in candidates:
         if path.exists():
             try:
-                con = pd.read_excel(str(path))
+                engine = 'xlrd' if str(path).endswith('.xls') else 'openpyxl'
+                con = pd.read_excel(str(path), engine=engine)
                 con['NUM_STR'] = con['NUMERO_LINHA'].fillna(0).astype(int).astype(str).str.strip()
                 con['TEL_STR'] = con['TELEFONE_PORTADO'].fillna(0).astype(int).astype(str).str.strip()
                 _PORT_CACHE = {
@@ -60,7 +61,8 @@ def carregar_conectadas_de_bytes(file_bytes, filename):
     global _PORT_CACHE
     try:
         import io
-        con = pd.read_excel(io.BytesIO(file_bytes))
+        engine = 'xlrd' if filename.lower().endswith('.xls') else 'openpyxl'
+        con = pd.read_excel(io.BytesIO(file_bytes), engine=engine)
         con['NUM_STR'] = con['NUMERO_LINHA'].fillna(0).astype(int).astype(str).str.strip()
         con['TEL_STR'] = con['TELEFONE_PORTADO'].fillna(0).astype(int).astype(str).str.strip()
         _PORT_CACHE = {
