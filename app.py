@@ -1,9 +1,29 @@
-from processamento import (processar_arquivo, calcular_resumo,
-                            carregar_conectadas_de_bytes, conectadas_carregado,
-                            get_data_upload_conectadas, garantir_conectadas)
-from banco import (carregar_controle, salvar_controle, carregar_historico,
-                   atualizar_banco, registrar_envio, registrar_bloqueio,
-                   carregar_snapshots, salvar_snapshot)
+import os
+import os as _os
+import streamlit as st
+import pandas as pd
+import plotly.graph_objects as go
+from datetime import date, datetime
+import io
+
+from processamento import (
+    processar_arquivo,
+    calcular_resumo,
+    conectadas_carregado,
+    get_data_upload_conectadas,
+    garantir_conectadas
+)
+
+from banco import (
+    carregar_controle,
+    salvar_controle,
+    carregar_historico,
+    atualizar_banco,
+    registrar_envio,
+    registrar_bloqueio,
+    carregar_snapshots,
+    salvar_snapshot
+)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ENDPOINT WEBHOOK — recebe bloqueio do n8n quando cliente clica em BLOQUEAR
