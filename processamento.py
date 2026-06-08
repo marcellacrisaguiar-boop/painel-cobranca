@@ -52,8 +52,12 @@ def _build_cache(con: pd.DataFrame):
     global _PORT_CACHE, _CONECTADAS_DATA_UPLOAD
 
     def to_str(s):
-        try:    return str(int(float(s))) if pd.notna(s) and s else ''
-        except: return str(s).strip() if s else ''
+        if s is None or (isinstance(s, float) and pd.isna(s)): return ''
+        s = str(s).strip().replace(' ','').replace('-','').replace('(','').replace(')','')
+        # Remover .0 de floats convertidos para string
+        if s.endswith('.0'): s = s[:-2]
+        try:    return str(int(float(s))) if s else ''
+        except: return s
 
     con = con.copy()
     con['NUM_STR'] = con['NUMERO_LINHA'].apply(to_str)
@@ -114,8 +118,11 @@ def garantir_conectadas():
         _carregar_conectadas_supabase()
 
 def _fmt_num(v):
-    try:    return str(int(float(v))) if v else ''
-    except: return str(v) if v else ''
+    if v is None or v == '': return ''
+    s = str(v).strip().replace(' ','').replace('-','').replace('(','').replace(')','')
+    if s.endswith('.0'): s = s[:-2]
+    try:    return str(int(float(s))) if s else ''
+    except: return s
 
 PAGA_S = {'Paga','Pagamento Cartão de Crédito','Ordem Pagto','Parcelada','Em Negociação'}
 
