@@ -146,11 +146,15 @@ with st.sidebar:
     con_up = st.file_uploader("CONECTADAS (.xlsx/.xls)", type=['xlsx','xls'],
                                key='con_up', label_visibility='collapsed')
     if con_up:
-        if carregar_conectadas_de_bytes(con_up.read(), con_up.name):
-            st.markdown('<div class="ok-box">✅ Carregado!</div>', unsafe_allow_html=True)
-            st.rerun()
-        else:
-            st.error("Erro ao carregar CONECTADAS")
+        with st.spinner("Carregando CONECTADAS..."):
+            file_bytes = con_up.read()
+            st.caption(f"Arquivo: {con_up.name} | {len(file_bytes):,} bytes")
+            ok = carregar_conectadas_de_bytes(file_bytes, con_up.name)
+            if ok:
+                st.markdown('<div class="ok-box">✅ Carregado!</div>', unsafe_allow_html=True)
+                st.rerun()
+            else:
+                st.error("Erro ao carregar — verifique o log (Manage app)")
 
     st.markdown("---")
 

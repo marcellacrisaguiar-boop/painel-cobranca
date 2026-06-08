@@ -35,19 +35,7 @@ def _carregar_conectadas_supabase():
         res = sb.table('conectadas').select('*').execute()
         if not res.data: return False
         con = pd.DataFrame(res.data)
-        con['NUM_STR'] = con['NUMERO_LINHA'].fillna('').astype(str).str.strip()
-        con['TEL_STR'] = con['TELEFONE_PORTADO'].fillna('').astype(str).str.strip()
-        _PORT_CACHE = {
-            'nome':  {**con.set_index('TEL_STR')['NOME'].to_dict(),
-                       **con.set_index('NUM_STR')['NOME'].to_dict()},
-            'tel':   {**con.set_index('TEL_STR')['TELEFONE_PORTADO'].to_dict(),
-                       **con.set_index('NUM_STR')['TELEFONE_PORTADO'].to_dict()},
-            'linha': {**con.set_index('TEL_STR')['NUMERO_LINHA'].to_dict(),
-                       **con.set_index('NUM_STR')['NUMERO_LINHA'].to_dict()},
-            'port':  {**con.set_index('TEL_STR')['PORTABILIDADE'].to_dict(),
-                       **con.set_index('NUM_STR')['PORTABILIDADE'].to_dict()},
-        }
-        _CONECTADAS_DATA_UPLOAD = datetime.now().strftime('%d/%m/%Y %H:%M')
+        _build_cache(con)
         print(f"[CONECTADAS] ✓ Carregado do Supabase: {len(con)} registros")
         return True
     except Exception as e:
@@ -55,20 +43,37 @@ def _carregar_conectadas_supabase():
         return False
 
 def _build_cache(con: pd.DataFrame):
+    """
+    Monta cache indexado por AMBAS as chaves:
+      - NUMERO_LINHA  (nova linha TIM = pode ser o Número de acesso)
+      - TELEFONE_PORTADO (número portado = também pode ser o Número de acesso)
+    Assim qualquer um dos dois encontra o cliente.
+    """
     global _PORT_CACHE, _CONECTADAS_DATA_UPLOAD
-    con['NUM_STR'] = con['NUMERO_LINHA'].fillna('').astype(str).str.strip()
-    con['TEL_STR'] = con['TELEFONE_PORTADO'].fillna('').astype(str).str.strip()
-    _PORT_CACHE = {
-        'nome':  {**con.set_index('TEL_STR')['NOME'].to_dict(),
-                   **con.set_index('NUM_STR')['NOME'].to_dict()},
-        'tel':   {**con.set_index('TEL_STR')['TELEFONE_PORTADO'].to_dict(),
-                   **con.set_index('NUM_STR')['TELEFONE_PORTADO'].to_dict()},
-        'linha': {**con.set_index('TEL_STR')['NUMERO_LINHA'].to_dict(),
-                   **con.set_index('NUM_STR')['NUMERO_LINHA'].to_dict()},
-        'port':  {**con.set_index('TEL_STR')['PORTABILIDADE'].to_dict(),
-                   **con.set_index('NUM_STR')['PORTABILIDADE'].to_dict()},
-    }
+
+    def to_str(s):
+        try:    return str(int(float(s))) if pd.notna(s) and s else ''
+        except: return str(s).strip() if s else ''
+
+    con = con.copy()
+    con['NUM_STR'] = con['NUMERO_LINHA'].apply(to_str)
+    con['TEL_STR'] = con['TELEFONE_PORTADO'].apply(to_str)
+
+    # Indexar por NUMERO_LINHA (prioridade 1 — nova linha TIM)
+    d_nome  = con[con['NUM_STR']!=''].set_index('NUM_STR')['NOME'].to_dict()
+    d_tel   = con[con['NUM_STR']!=''].set_index('NUM_STR')['TELEFONE_PORTADO'].apply(to_str).to_dict()
+    d_linha = con[con['NUM_STR']!=''].set_index('NUM_STR')['NUMERO_LINHA'].apply(to_str).to_dict()
+    d_port  = con[con['NUM_STR']!=''].set_index('NUM_STR')['PORTABILIDADE'].to_dict()
+
+    # Indexar por TELEFONE_PORTADO (prioridade 2 — fallback)
+    d_nome.update(con[con['TEL_STR']!=''].set_index('TEL_STR')['NOME'].to_dict())
+    d_tel.update( con[con['TEL_STR']!=''].set_index('TEL_STR')['TELEFONE_PORTADO'].apply(to_str).to_dict())
+    d_linha.update(con[con['TEL_STR']!=''].set_index('TEL_STR')['NUMERO_LINHA'].apply(to_str).to_dict())
+    d_port.update( con[con['TEL_STR']!=''].set_index('TEL_STR')['PORTABILIDADE'].to_dict())
+
+    _PORT_CACHE = {'nome': d_nome, 'tel': d_tel, 'linha': d_linha, 'port': d_port}
     _CONECTADAS_DATA_UPLOAD = datetime.now().strftime('%d/%m/%Y %H:%M')
+    print(f"[CONECTADAS] Cache: {len(d_nome)} entradas (por linha + por tel)")
 
 def carregar_conectadas_de_bytes(file_bytes, filename):
     """Upload manual via painel — salva no Supabase e atualiza cache."""
