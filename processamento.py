@@ -330,7 +330,19 @@ def _salvar_safra_supabase(df: pd.DataFrame, safra: str, linhas_conectadas: int 
         for r in df_save.to_dict("records"):
             records.append({k: _cv_local(v) for k,v in r.items()})
         for i in range(0, len(records), 500):
-            sb.table("safras").insert(records[i:i+500]).execute()
+            try:
+                sb.table("safras").insert(records[i:i+500]).execute()
+            except Exception as e_insert:
+                print(f"[SAFRAS] Erro insert lote {i}: {e_insert}")
+                # Tentar inserir um por um para identificar o registro problemático
+                for j, rec in enumerate(records[i:i+500]):
+                    try:
+                        sb.table("safras").insert(rec).execute()
+                    except Exception as e_row:
+                        bad_keys = [k for k,v in rec.items() if v is not None and not isinstance(v, (str,int,float,bool,type(None)))]
+                        print(f"[SAFRAS] Erro row {i+j}: {e_row} | tipos ruins: {bad_keys}")
+                        break
+                raise e_insert
         print(f"[SAFRAS] ✓ {safra}: {faturas_enc} registros | cobertura {cobertura}%")
     except Exception as e:
         print(f"[SAFRAS] Erro: {e}")

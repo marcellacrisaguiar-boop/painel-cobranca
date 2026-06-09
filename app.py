@@ -400,12 +400,8 @@ with tab2:
         safras = sorted(df['SAFRA'].dropna().unique().tolist())
 
         for safra in safras:
-            res = st.session_state.resumos.get(safra)
-            if res is None or not res.get('rows'):
-                # Recalcular do controle atual
-                from processamento import calcular_resumo
-                res = calcular_resumo(df_s)
             df_s = df[df['SAFRA'] == safra]
+            res  = st.session_state.resumos.get(safra)
 
             # Calcular métricas do controle
             N  = res['N']  if res else len(df_s)
