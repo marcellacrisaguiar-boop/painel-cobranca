@@ -6,24 +6,13 @@ import plotly.graph_objects as go
 from datetime import date, datetime
 import io
 
-from processamento import (
-    processar_arquivo,
-    calcular_resumo,
-    conectadas_carregado,
-    get_data_upload_conectadas,
-    garantir_conectadas
-)
-
-from banco import (
-    carregar_controle,
-    salvar_controle,
-    carregar_historico,
-    atualizar_banco,
-    registrar_envio,
-    registrar_bloqueio,
-    carregar_snapshots,
-    salvar_snapshot
-)
+from processamento import (processar_arquivo, calcular_resumo,
+                            carregar_conectadas_de_bytes, conectadas_carregado,
+                            get_data_upload_conectadas, garantir_conectadas)
+from banco import (carregar_controle, salvar_controle, carregar_historico,
+                   atualizar_banco, registrar_envio, registrar_bloqueio,
+                   carregar_snapshots, salvar_snapshot,
+                   carregar_historico_envios, registrar_envios_historico)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ENDPOINT WEBHOOK — recebe bloqueio do n8n quando cliente clica em BLOQUEAR
@@ -132,7 +121,8 @@ def exportar_wpp(df):
 if 'df_ctrl' not in st.session_state: st.session_state.df_ctrl = carregar_controle()
 if 'df_hist' not in st.session_state: st.session_state.df_hist = carregar_historico()
 if 'resumos' not in st.session_state: st.session_state.resumos = {}
-if 'snaps'   not in st.session_state: st.session_state.snaps   = carregar_snapshots()
+if 'snaps'        not in st.session_state: st.session_state.snaps        = carregar_snapshots()
+if 'hist_envios'  not in st.session_state: st.session_state.hist_envios  = carregar_historico_envios()
 
 # Garantir CONECTADAS carregado do Supabase ao iniciar
 garantir_conectadas()
@@ -242,9 +232,10 @@ st.markdown(f"<small style='color:#3B4163'>Safras: {' · '.join(safras_at) or 'N
             unsafe_allow_html=True)
 st.markdown("---")
 
-tab1,tab2,tab3,tab4,tab5 = st.tabs([
+tab1,tab2,tab3,tab4,tab5,tab6 = st.tabs([
     "🎯  Controle de Envio","📈  Resumo & Funil",
-    "💰  Histórico de Pagamentos","📲  Envios do Dia","⚙️  Tabela de Fluxo"])
+    "💰  Histórico de Pagamentos","📲  Envios do Dia",
+    "📋  Histórico de Envios","⚙️  Tabela de Fluxo"])
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TAB 1 — CONTROLE DE ENVIO
@@ -659,69 +650,106 @@ with tab4:
                     f"<span style='font-weight:600;color:#E8EAF0'>{etapa}</span>"
                     f"<span style='color:#3B4163;font-size:.82rem'>{len(df_et):,} clientes</span>"
                     f"</div>", unsafe_allow_html=True)
+        # ── Resumo do dia ─────────────────────────────────────────────────────
+        st.markdown('<div class="sec">Mensagens enviadas hoje</div>', unsafe_allow_html=True)
+        hist_env = st.session_state.hist_envios
+        cols_res = st.columns(len(ETAPA_ORDER))
+        for i, et in enumerate(ETAPA_ORDER):
+            cor  = ETAPA_COR.get(et, '#fff')
+            n_env = 0
+            if hist_env is not None and len(hist_env) > 0 and et in hist_env.columns:
+                n_env = int(hist_env[et].apply(
+                    lambda v: str(v)[:10] == str(hoje) if pd.notna(v) and v else False
+                ).sum())
+            with cols_res[i]:
+                st.markdown(f"""<div style='text-align:center;background:#161B27;
+                    border:1px solid #1E2535;border-top:2px solid {cor};
+                    border-radius:8px;padding:.5rem .3rem;margin-bottom:.8rem'>
+                    <div style='font-size:.6rem;color:#3B4163;font-weight:700;
+                         letter-spacing:.08em;text-transform:uppercase'>{et}</div>
+                    <div style='font-size:1.3rem;font-weight:700;color:{cor};
+                         font-family:DM Mono,monospace'>{n_env:,}</div>
+                </div>""", unsafe_allow_html=True)
+
+        st.markdown('---')
+
+        for etapa in ETAPA_ORDER:
+            df_et = df_envio_hoje[df_envio_hoje['ETAPA'] == etapa]
+            if len(df_et) == 0:
+                continue
+
+            cor = ETAPA_COR.get(etapa, '#fff')
+            col_hdr, col_btn = st.columns([3, 1])
+            with col_hdr:
+                st.markdown(
+                    f"<div style='display:flex;align-items:center;gap:10px;margin:.8rem 0 .4rem'>"
+                    f"<div style='width:10px;height:10px;border-radius:50%;background:{cor}'></div>"
+                    f"<span style='font-weight:600;color:#E8EAF0'>{etapa}</span>"
+                    f"<span style='color:#3B4163;font-size:.82rem'>{len(df_et):,} clientes</span>"
+                    f"</div>", unsafe_allow_html=True)
             with col_btn:
                 if st.button(f'📲 Disparar {etapa}', key=f'btn_{etapa}', use_container_width=True):
-                    if not WEBHOOK_URL:
-                        st.error('Configure a URL do webhook n8n antes de disparar.')
-                    else:
-                        # Montar payload — 1 registro por cliente com os 2 números
-                        # e parâmetros HSM: numero (TELEFONE_PORTADO), nome, valor, vencimento
-                        def _fmt_v(v):
-                            try: return f"R$ {float(v):,.2f}".replace(",","X").replace(".",",").replace("X",".")
-                            except: return str(v) if v else ""
-                        def _fmt_d(v):
-                            try: return pd.to_datetime(v, errors="coerce").strftime("%d/%m/%Y")
-                            except: return str(v) if v else ""
+                    st.session_state[f'confirmar_{etapa}'] = True
 
-                        records = []
-                        for _, r in df_et.iterrows():
-                            tel_portado = str(r.get("NUMERO PORTADO", "") or "").strip()
-                            num_linha   = str(r.get("NUMERO LINHA",   "") or "").strip()
-                            nome        = str(r.get("NOME", "") or "").strip()
-                            valor_fmt   = _fmt_v(r.get("VALOR"))
-                            venc_fmt    = _fmt_d(r.get("VENCIMENTO"))
+            # Modal de confirmação
+            if st.session_state.get(f'confirmar_{etapa}'):
+                st.warning(f'⚠️ Confirmar envio de **{len(df_et):,} clientes** para **{etapa}**?')
+                col_sim, col_nao = st.columns(2)
+                with col_sim:
+                    if st.button(f'✅ Confirmar envio', key=f'sim_{etapa}', use_container_width=True):
+                        if not WEBHOOK_URL:
+                            st.error('Configure a URL do webhook n8n.')
+                        else:
+                            records = []
+                            for _, r in df_et.iterrows():
+                                tel_p = str(r.get('NUMERO PORTADO','') or '').strip()
+                                nl    = str(r.get('NUMERO LINHA','') or '').strip()
+                                venc  = r.get('VENCIMENTO')
+                                try:
+                                    venc_fmt = pd.to_datetime(venc, errors='coerce').strftime('%d/%m/%Y')
+                                except: venc_fmt = ''
+                                records.append({
+                                    'CPF': str(r.get('CPF','') or ''),
+                                    'SAFRA': str(r.get('SAFRA','') or ''),
+                                    'ETAPA': etapa,
+                                    'HSM': HSM_MAP.get(etapa,''),
+                                    'PORTABILIDADE': str(r.get('PORTABILIDADE','') or ''),
+                                    'FATURA': int(r.get('FATURA',1) or 1),
+                                    'DIAS_ATRASO': int(r.get('DIAS ATRASO',0) or 0),
+                                    'TELEFONE_PORTADO': tel_p,
+                                    'NUMERO_LINHA': nl,
+                                    'hsm_numero': tel_p,
+                                    'hsm_nome': str(r.get('NOME','') or ''),
+                                    'hsm_valor': fmt_brl(r.get('VALOR')),
+                                    'hsm_vencimento': venc_fmt,
+                                })
+                            try:
+                                with st.spinner(f'Enviando {len(records):,} mensagens...'):
+                                    resp = _req.post(WEBHOOK_URL,
+                                        json={'etapa': etapa, 'hsm': HSM_MAP.get(etapa,''),
+                                              'total': len(records), 'data': str(hoje),
+                                              'clientes': records},
+                                        timeout=30)
+                                if resp.status_code in (200, 201):
+                                    # Atualizar ULTIMO ENVIO no controle
+                                    mask = st.session_state.df_ctrl['ETAPA'] == etapa
+                                    st.session_state.df_ctrl.loc[mask, 'ULTIMO ENVIO'] = hoje
+                                    salvar_controle(st.session_state.df_ctrl)
+                                    # Registrar no histórico de envios
+                                    registrar_envios_historico(df_et, etapa, hoje)
+                                    st.session_state.hist_envios = carregar_historico_envios()
+                                    st.session_state.pop(f'confirmar_{etapa}', None)
+                                    st.success(f'✅ {len(records):,} mensagens enviadas com sucesso! ({etapa})')
+                                    st.rerun()
+                                else:
+                                    st.error(f'Erro webhook: {resp.status_code} — {resp.text[:200]}')
+                            except Exception as e:
+                                st.error(f'Erro: {e}')
+                with col_nao:
+                    if st.button('❌ Cancelar', key=f'nao_{etapa}', use_container_width=True):
+                        st.session_state.pop(f'confirmar_{etapa}', None)
+                        st.rerun()
 
-                            records.append({
-                                # Identificação
-                                "CPF":            str(r.get("CPF", "") or ""),
-                                "SAFRA":          str(r.get("SAFRA", "") or ""),
-                                "ETAPA":          etapa,
-                                "HSM":            HSM_MAP.get(etapa, ""),
-                                "PORTABILIDADE":  str(r.get("PORTABILIDADE", "") or ""),
-                                "FATURA":         int(r.get("FATURA", 1) or 1),
-                                "DIAS_ATRASO":    int(r.get("DIAS ATRASO", 0) or 0),
-
-                                # Dois números para disparo
-                                "TELEFONE_PORTADO": tel_portado,
-                                "NUMERO_LINHA":     num_linha,
-
-                                # Parâmetros variáveis da HSM
-                                "hsm_numero":     tel_portado,   # número de referência
-                                "hsm_nome":       nome,
-                                "hsm_valor":      valor_fmt,
-                                "hsm_vencimento": venc_fmt,
-                            })
-                        try:
-                            with st.spinner(f'Enviando {len(records)} clientes para o n8n...'):
-                                resp = _req.post(WEBHOOK_URL,
-                                    json={
-                                        'etapa':  etapa,
-                                        'hsm':    HSM_MAP.get(etapa, ''),
-                                        'total':  len(records),
-                                        'data':   str(hoje),
-                                        'clientes': records,
-                                    },
-                                    timeout=30)
-                            if resp.status_code in (200, 201):
-                                mask = st.session_state.df_ctrl['ETAPA'] == etapa
-                                st.session_state.df_ctrl.loc[mask, 'ULTIMO ENVIO'] = hoje
-                                salvar_controle(st.session_state.df_ctrl)
-                                st.success(f'✅ {len(records)} clientes enviados! ({etapa})')
-                                st.rerun()
-                            else:
-                                st.error(f'Erro webhook: {resp.status_code} — {resp.text[:200]}')
-                        except Exception as e:
-                            st.error(f'Erro ao chamar webhook: {e}')
 
             cols_show = ['NOME','NUMERO PORTADO','NUMERO LINHA','FATURA',
                          'STATUS 1ª FATURA','STATUS 2ª FATURA',
@@ -765,9 +793,76 @@ with tab4:
             st.dataframe(df_b, use_container_width=True, height=200, hide_index=True)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TAB 4 — TABELA DE FLUXO
+# TAB 5 — HISTÓRICO DE ENVIOS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 with tab5:
+    st.markdown("### 📋 Histórico de Envios por Cliente")
+    st.markdown("<small style='color:#3B4163'>Uma linha por cliente — colunas mostram a data de cada envio por etapa</small>",
+                unsafe_allow_html=True)
+
+    df_he = st.session_state.hist_envios
+    if df_he is None or len(df_he) == 0:
+        st.markdown("""<div style='text-align:center;padding:4rem;color:#3B4163'>
+            <div style='font-size:3rem'>📋</div>
+            <div style='font-size:1.1rem;color:#5C6480;margin-top:1rem'>Nenhum envio registrado ainda</div>
+            <div style='font-size:.85rem;margin-top:.5rem'>Os envios aparecem aqui automaticamente após cada disparo</div>
+        </div>""", unsafe_allow_html=True)
+    else:
+        # Métricas
+        total_clientes = len(df_he)
+        # Quantos receberam pelo menos 1 mensagem
+        etapa_cols = [c for c in ETAPA_ORDER if c in df_he.columns]
+        receberam  = int(df_he[etapa_cols].notna().any(axis=1).sum()) if etapa_cols else 0
+
+        h1, h2, h3 = st.columns(3)
+        with h1: st.markdown(mc('Clientes no histórico', f'{total_clientes:,}', tipo='azul'), unsafe_allow_html=True)
+        with h2: st.markdown(mc('Receberam mensagem', f'{receberam:,}', tipo='verde'), unsafe_allow_html=True)
+        with h3:
+            # Etapa com mais envios
+            mais_enviada = '—'
+            if etapa_cols:
+                contagens = {et: int(df_he[et].notna().sum()) for et in etapa_cols if et in df_he.columns}
+                if contagens:
+                    mais_enviada = max(contagens, key=contagens.get)
+            st.markdown(mc('Etapa mais enviada', mais_enviada, tipo='roxo'), unsafe_allow_html=True)
+
+        st.markdown('---')
+
+        # Filtros
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            safras_he = ['Todas'] + sorted(df_he['SAFRA'].dropna().unique().tolist()) \
+                        if 'SAFRA' in df_he.columns else ['Todas']
+            filtro_he_safra = st.selectbox('Safra', safras_he, key='he_safra')
+        with col_f2:
+            filtro_he_etapa = st.selectbox('Etapa enviada', ['Todas'] + ETAPA_ORDER, key='he_etapa')
+
+        df_he_f = df_he.copy()
+        if filtro_he_safra != 'Todas' and 'SAFRA' in df_he_f.columns:
+            df_he_f = df_he_f[df_he_f['SAFRA'] == filtro_he_safra]
+        if filtro_he_etapa != 'Todas' and filtro_he_etapa in df_he_f.columns:
+            df_he_f = df_he_f[df_he_f[filtro_he_etapa].notna()]
+
+        # Colunas a exibir
+        base_cols = ['SAFRA','NOME','NUMERO PORTADO','NUMERO LINHA','CPF','PORTABILIDADE']
+        etapa_display = [c for c in ETAPA_ORDER if c in df_he_f.columns]
+        show_cols = [c for c in base_cols if c in df_he_f.columns] + etapa_display
+
+        df_he_show = df_he_f[show_cols].copy()
+        df_he_show = df_he_show.fillna('').replace('None','')
+
+        st.dataframe(df_he_show, use_container_width=True, height=450, hide_index=True)
+
+        # Export
+        buf = io.BytesIO()
+        df_he_show.to_excel(buf, index=False, engine='openpyxl')
+        st.download_button('⬇️ Exportar XLSX',
+                           data=buf.getvalue(),
+                           file_name=f'historico_envios_{date.today().strftime("%Y%m%d")}.xlsx',
+                           mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+
+with tab6:
     st.markdown("### Funil de Cobrança — Regras de Envio")
     fluxo=[
         ("D-2 antes do vencimento","Preventivo","Lembrete","Todos","🟢"),

@@ -1,5 +1,5 @@
 """
-banco.py — Persistência via Supabase.
+banco.py — Persistência via Supabase com fallback local.
 """
 
 import os
@@ -10,20 +10,20 @@ from pathlib import Path
 SUPABASE_URL = os.getenv('SUPABASE_URL', '')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY', '')
 
-_sb = None
-def _get_sb():
-    global _sb
-    if _sb is None:
-        from supabase import create_client
-        _sb = create_client(SUPABASE_URL, SUPABASE_KEY)
-    return _sb
-
-# ── Fallback local (caso Supabase falhe) ──────────────────────────────────────
-DATA_DIR = Path(__file__).parent / 'data'
+DATA_DIR  = Path(__file__).parent / 'data'
 DATA_DIR.mkdir(exist_ok=True)
 CTRL_FILE = DATA_DIR / 'controle.parquet'
 HIST_FILE = DATA_DIR / 'historico.parquet'
 SNAP_FILE = DATA_DIR / 'snapshots.parquet'
+ENVI_FILE = DATA_DIR / 'historico_envios.parquet'
+
+_sb = None
+def _get_sb():
+    global _sb
+    if _sb is None and SUPABASE_URL and SUPABASE_KEY:
+        from supabase import create_client
+        _sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return _sb
 
 def _safe_read(path):
     try:
@@ -33,20 +33,34 @@ def _safe_read(path):
 
 def _safe_write(df, path):
     try: df.to_parquet(path, index=False)
-    except Exception as e: print(f"[local] Erro {path}: {e}")
+    except Exception as e: print(f"[local] {e}")
 
-def _to_df(data):
-    if isinstance(data, pd.DataFrame): return data
-    if not data: return pd.DataFrame()
-    return pd.DataFrame(data)
+def _date_str(v):
+    if isinstance(v, date): return v.strftime('%Y-%m-%d')
+    return v
+
+def _clean(df):
+    """Converte datas para string antes de enviar ao Supabase."""
+    df = df.copy()
+    for col in df.columns:
+        df[col] = df[col].apply(lambda v: _date_str(v) if isinstance(v, date) else v)
+    return df.where(pd.notnull(df), None)
 
 # ── CONTROLE ──────────────────────────────────────────────────────────────────
 def carregar_controle() -> pd.DataFrame:
     try:
-        res = _get_sb().table('controle_envio').select('*').execute()
-        df = _to_df(res.data)
-        if len(df) > 0 and 'id' in df.columns:
-            df = df.drop(columns=['id'])
+        sb = _get_sb()
+        if not sb: return _safe_read(CTRL_FILE)
+        todos = []
+        offset = 0
+        while True:
+            res = sb.table('controle_envio').select('*').range(offset, offset+999).execute()
+            if not res.data: break
+            todos.extend(res.data)
+            if len(res.data) < 1000: break
+            offset += 1000
+        df = pd.DataFrame(todos)
+        if len(df) > 0 and 'id' in df.columns: df = df.drop(columns=['id'])
         return df
     except Exception as e:
         print(f"[Supabase] carregar_controle: {e}")
@@ -55,23 +69,10 @@ def carregar_controle() -> pd.DataFrame:
 def salvar_controle(df: pd.DataFrame):
     try:
         sb = _get_sb()
-        # Limpar tabela e reinserir
+        if not sb: return _safe_write(df, CTRL_FILE)
         sb.table('controle_envio').delete().neq('id', 0).execute()
         if len(df) == 0: return
-        # Converter datas para string
-        df_save = df.copy()
-        for col in df_save.columns:
-            if df_save[col].dtype == 'object': continue
-            try:
-                if pd.api.types.is_datetime64_any_dtype(df_save[col]):
-                    df_save[col] = df_save[col].dt.strftime('%Y-%m-%d')
-            except: pass
-        # Converter date objects
-        for col in df_save.columns:
-            df_save[col] = df_save[col].apply(
-                lambda v: v.strftime('%Y-%m-%d') if isinstance(v, date) else v)
-        records = df_save.where(pd.notnull(df_save), None).to_dict('records')
-        # Inserir em lotes de 500
+        records = _clean(df).to_dict('records')
         for i in range(0, len(records), 500):
             sb.table('controle_envio').insert(records[i:i+500]).execute()
         _safe_write(df, CTRL_FILE)
@@ -79,13 +80,14 @@ def salvar_controle(df: pd.DataFrame):
         print(f"[Supabase] salvar_controle: {e}")
         _safe_write(df, CTRL_FILE)
 
-# ── HISTÓRICO ─────────────────────────────────────────────────────────────────
+# ── HISTÓRICO DE PAGAMENTOS ───────────────────────────────────────────────────
 def carregar_historico() -> pd.DataFrame:
     try:
+        sb = _get_sb()
+        if not sb: return _safe_read(HIST_FILE)
         res = _get_sb().table('historico_pagamentos').select('*').execute()
-        df = _to_df(res.data)
-        if len(df) > 0 and 'id' in df.columns:
-            df = df.drop(columns=['id'])
+        df = pd.DataFrame(res.data) if res.data else pd.DataFrame()
+        if len(df) > 0 and 'id' in df.columns: df = df.drop(columns=['id'])
         return df
     except Exception as e:
         print(f"[Supabase] carregar_historico: {e}")
@@ -94,13 +96,10 @@ def carregar_historico() -> pd.DataFrame:
 def salvar_historico(df: pd.DataFrame):
     try:
         sb = _get_sb()
+        if not sb: return _safe_write(df, HIST_FILE)
         sb.table('historico_pagamentos').delete().neq('id', 0).execute()
         if len(df) == 0: return
-        df_save = df.copy()
-        for col in df_save.columns:
-            df_save[col] = df_save[col].apply(
-                lambda v: v.strftime('%Y-%m-%d') if isinstance(v, date) else v)
-        records = df_save.where(pd.notnull(df_save), None).to_dict('records')
+        records = _clean(df).to_dict('records')
         for i in range(0, len(records), 500):
             sb.table('historico_pagamentos').insert(records[i:i+500]).execute()
         _safe_write(df, HIST_FILE)
@@ -108,13 +107,14 @@ def salvar_historico(df: pd.DataFrame):
         print(f"[Supabase] salvar_historico: {e}")
         _safe_write(df, HIST_FILE)
 
-# ── SNAPSHOTS DE ESTORNO ──────────────────────────────────────────────────────
+# ── SNAPSHOTS ─────────────────────────────────────────────────────────────────
 def carregar_snapshots() -> pd.DataFrame:
     try:
-        res = _get_sb().table('snapshots_estorno').select('*').order('DATA').execute()
-        df = _to_df(res.data)
-        if len(df) > 0 and 'id' in df.columns:
-            df = df.drop(columns=['id'])
+        sb = _get_sb()
+        if not sb: return _safe_read(SNAP_FILE)
+        res = sb.table('snapshots_estorno').select('*').order('DATA').execute()
+        df = pd.DataFrame(res.data) if res.data else pd.DataFrame()
+        if len(df) > 0 and 'id' in df.columns: df = df.drop(columns=['id'])
         return df
     except Exception as e:
         print(f"[Supabase] carregar_snapshots: {e}")
@@ -122,24 +122,134 @@ def carregar_snapshots() -> pd.DataFrame:
 
 def salvar_snapshot(safra, gross, estorno, pagamentos, data=None):
     hoje = data or date.today()
-    novo = {
-        'DATA': hoje.strftime('%Y-%m-%d') if isinstance(hoje, date) else str(hoje),
-        'SAFRA': safra, 'GROSS': int(gross),
-        'ESTORNO': int(estorno), 'PAGAMENTOS': int(pagamentos),
-        'PCT_ESTORNO': round(estorno / gross * 100, 2) if gross else 0,
-    }
+    novo = {'DATA': hoje.strftime('%Y-%m-%d'), 'SAFRA': safra,
+            'GROSS': int(gross), 'ESTORNO': int(estorno),
+            'PAGAMENTOS': int(pagamentos),
+            'PCT_ESTORNO': round(estorno/gross*100, 2) if gross else 0}
     try:
-        _get_sb().table('snapshots_estorno').insert(novo).execute()
+        sb = _get_sb()
+        if sb: sb.table('snapshots_estorno').insert(novo).execute()
     except Exception as e:
         print(f"[Supabase] salvar_snapshot: {e}")
     snap = carregar_snapshots()
     _safe_write(snap, SNAP_FILE)
     return snap
 
+# ── HISTÓRICO DE ENVIOS ───────────────────────────────────────────────────────
+def carregar_historico_envios() -> pd.DataFrame:
+    try:
+        sb = _get_sb()
+        if not sb: return _safe_read(ENVI_FILE)
+        todos = []
+        offset = 0
+        while True:
+            res = sb.table('historico_envios').select('*').range(offset, offset+999).execute()
+            if not res.data: break
+            todos.extend(res.data)
+            if len(res.data) < 1000: break
+            offset += 1000
+        df = pd.DataFrame(todos) if todos else pd.DataFrame()
+        if len(df) > 0 and 'id' in df.columns: df = df.drop(columns=['id'])
+        return df
+    except Exception as e:
+        print(f"[Supabase] carregar_historico_envios: {e}")
+        return _safe_read(ENVI_FILE)
+
+def registrar_envios_historico(df_enviados: pd.DataFrame, etapa: str, data_envio: date):
+    """
+    Atualiza historico_envios — uma linha por cliente, coluna por etapa.
+    Cria linha se não existir, atualiza coluna da etapa se já existir.
+    """
+    if df_enviados is None or len(df_enviados) == 0: return
+
+    col_etapa = etapa  # ex: 'Preventivo', 'Etapa 1', etc.
+    data_str  = data_envio.strftime('%Y-%m-%d')
+
+    try:
+        sb = _get_sb()
+        if not sb:
+            _registrar_envios_local(df_enviados, etapa, data_envio)
+            return
+
+        for _, row in df_enviados.iterrows():
+            cpf   = str(row.get('CPF','') or '')
+            safra = str(row.get('SAFRA','') or '')
+            if not cpf or not safra: continue
+
+            # Verificar se já existe linha para este CPF+SAFRA
+            res = sb.table('historico_envios')\
+                    .select('id')\
+                    .eq('"CPF"', cpf)\
+                    .eq('"SAFRA"', safra)\
+                    .execute()
+
+            record = {
+                '"CPF"':            cpf,
+                '"NOME"':           str(row.get('NOME','') or ''),
+                '"NUMERO PORTADO"': str(row.get('NUMERO PORTADO','') or ''),
+                '"NUMERO LINHA"':   str(row.get('NUMERO LINHA','') or ''),
+                '"SAFRA"':          safra,
+                '"PORTABILIDADE"':  str(row.get('PORTABILIDADE','') or ''),
+                f'"{col_etapa}"':   data_str,
+            }
+
+            if res.data:
+                # Atualizar linha existente — só a coluna da etapa
+                sb.table('historico_envios')\
+                  .update({f'"{col_etapa}"': data_str})\
+                  .eq('"CPF"', cpf).eq('"SAFRA"', safra).execute()
+            else:
+                # Inserir nova linha
+                sb.table('historico_envios').insert({
+                    'CPF': cpf,
+                    'NOME': str(row.get('NOME','') or ''),
+                    'NUMERO PORTADO': str(row.get('NUMERO PORTADO','') or ''),
+                    'NUMERO LINHA': str(row.get('NUMERO LINHA','') or ''),
+                    'SAFRA': safra,
+                    'PORTABILIDADE': str(row.get('PORTABILIDADE','') or ''),
+                    col_etapa: data_str,
+                }).execute()
+
+        print(f"[ENVIOS] ✓ {len(df_enviados)} registros salvos — {etapa}")
+    except Exception as e:
+        print(f"[Supabase] registrar_envios_historico: {e}")
+        _registrar_envios_local(df_enviados, etapa, data_envio)
+
+def _registrar_envios_local(df_enviados, etapa, data_envio):
+    """Fallback local para histórico de envios."""
+    df_hist = _safe_read(ENVI_FILE)
+    data_str = data_envio.strftime('%d/%m/%Y')
+    rows = []
+    for _, row in df_enviados.iterrows():
+        cpf   = str(row.get('CPF','') or '')
+        safra = str(row.get('SAFRA','') or '')
+        if not cpf: continue
+        existing = df_hist[
+            (df_hist['CPF'].astype(str) == cpf) &
+            (df_hist['SAFRA'].astype(str) == safra)
+        ] if len(df_hist) > 0 and 'CPF' in df_hist.columns else pd.DataFrame()
+
+        if len(existing) > 0:
+            df_hist.loc[existing.index[0], etapa] = data_str
+        else:
+            new_row = {
+                'CPF': cpf, 'NOME': str(row.get('NOME','') or ''),
+                'NUMERO PORTADO': str(row.get('NUMERO PORTADO','') or ''),
+                'NUMERO LINHA': str(row.get('NUMERO LINHA','') or ''),
+                'SAFRA': safra,
+                'PORTABILIDADE': str(row.get('PORTABILIDADE','') or ''),
+                etapa: data_str,
+            }
+            rows.append(new_row)
+
+    if rows:
+        df_hist = pd.concat([df_hist, pd.DataFrame(rows)], ignore_index=True)
+    _safe_write(df_hist, ENVI_FILE)
+
 # ── ATUALIZAÇÃO ───────────────────────────────────────────────────────────────
 def atualizar_banco(df_ctrl_atual, df_novo, safra):
-    HIST_COLS = ['ENVIO', 'ULTIMO ENVIO', 'STATUS PAGAMENTO']
-    KEY_COLS  = ['NUMERO DE ACESSO', 'FATURA']
+    HIST_COLS = ['ENVIO','ULTIMO ENVIO','STATUS PAGAMENTO']
+    KEY_COLS  = ['NUMERO DE ACESSO','FATURA']
     OBRIG     = KEY_COLS + HIST_COLS + ['SAFRA']
 
     for c in OBRIG:
@@ -151,26 +261,26 @@ def atualizar_banco(df_ctrl_atual, df_novo, safra):
 
     cols_faltando = [c for c in OBRIG if c not in df_ctrl_atual.columns]
     if cols_faltando:
-        print(f"[banco] Resetando — colunas faltando: {cols_faltando}")
         salvar_controle(df_novo)
         return df_novo.copy(), pd.DataFrame()
 
     df_outras = df_ctrl_atual[df_ctrl_atual['SAFRA'] != safra].copy()
     df_safra  = df_ctrl_atual[df_ctrl_atual['SAFRA'] == safra].copy()
 
+    for c in HIST_COLS:
+        if c not in df_safra.columns: df_safra[c] = None
+
     if len(df_safra) == 0:
         df_final = pd.concat([df_outras, df_novo], ignore_index=True)
         salvar_controle(df_final)
         return df_final, pd.DataFrame()
-
-    for c in HIST_COLS:
-        if c not in df_safra.columns: df_safra[c] = None
 
     ctrl_idx = set(zip(df_safra['NUMERO DE ACESSO'].fillna('').astype(str),
                        df_safra['FATURA'].fillna('').astype(str)))
     novo_idx  = set(zip(df_novo['NUMERO DE ACESSO'].fillna('').astype(str),
                         df_novo['FATURA'].fillna('').astype(str)))
 
+    # Quem pagou
     pagaram_keys = ctrl_idx - novo_idx
     df_pagaram = df_safra[df_safra.apply(
         lambda r: (str(r.get('NUMERO DE ACESSO','')), str(r.get('FATURA',''))) in pagaram_keys,
@@ -183,10 +293,11 @@ def atualizar_banco(df_ctrl_atual, df_novo, safra):
                 'FATURA','VALOR','VENCIMENTO','PORTABILIDADE','ETAPA']
         df_hist_new = df_pagaram[[c for c in keep if c in df_pagaram.columns]].copy()
         df_hist_new.rename(columns={'ETAPA':'ETAPA NO PAGAMENTO'}, inplace=True)
-        df_hist_new['DATA PAGAMENTO'] = hoje
+        df_hist_new['DATA PAGAMENTO']     = hoje
         df_hist_new['DIAS ATÉ PAGAMENTO'] = df_hist_new['VENCIMENTO'].apply(
             lambda v: (hoje - v).days if isinstance(v, date) else None)
 
+    # Preservar histórico de envios
     cols_pres = [c for c in KEY_COLS + HIST_COLS if c in df_safra.columns]
     df_pres = df_safra[df_safra.apply(
         lambda r: (str(r.get('NUMERO DE ACESSO','')), str(r.get('FATURA',''))) in novo_idx,
@@ -225,7 +336,7 @@ def registrar_bloqueio(telefone_portado: str) -> bool:
     salvar_controle(df)
     return True
 
-# ── Registrar envio ───────────────────────────────────────────────────────────
+# ── Registrar envio manual ────────────────────────────────────────────────────
 def registrar_envio(numero_acesso: str, etapa: str, tipo: str, data_envio: date):
     df = carregar_controle()
     if df is None or len(df) == 0: return
