@@ -44,11 +44,18 @@ def _to_str_date(v):
     return v
 
 def _clean_df(df):
-    """Converte datas para string e limpa nulos."""
+    """Converte datas para string, limpa NaN/NaT/inf para None."""
+    import math
     df = df.copy()
+    def clean_val(v):
+        if v is None: return None
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)): return None
+        if isinstance(v, date): return v.strftime("%Y-%m-%d")
+        if str(v) in ("nan","NaT","None","<NA>"): return None
+        return v
     for col in df.columns:
-        df[col] = df[col].apply(_to_str_date)
-    return df.where(pd.notnull(df), None)
+        df[col] = df[col].apply(clean_val)
+    return df
 
 def _insert_lotes(sb, tabela, records, lote=500):
     """Insere registros em lotes."""

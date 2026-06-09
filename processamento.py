@@ -310,9 +310,18 @@ def _salvar_safra_supabase(df: pd.DataFrame, safra: str, linhas_conectadas: int 
             if col in df_save.columns:
                 df_save[col] = pd.to_datetime(df_save[col], errors='coerce').dt.strftime('%Y-%m-%d')
 
-        records = df_save.where(pd.notnull(df_save), None).to_dict('records')
+        # Limpar NaN/inf antes de serializar para JSON
+        import math as _math
+        def _cv(v):
+            if v is None: return None
+            if isinstance(v, float) and (_math.isnan(v) or _math.isinf(v)): return None
+            if str(v) in ("nan","NaT","None","<NA>"): return None
+            return v
+        records = []
+        for r in df_save.to_dict("records"):
+            records.append({k: _cv(v) for k,v in r.items()})
         for i in range(0, len(records), 500):
-            sb.table('safras').insert(records[i:i+500]).execute()
+            sb.table("safras").insert(records[i:i+500]).execute()
         print(f"[SAFRAS] ✓ {safra}: {faturas_enc} registros | cobertura {cobertura}%")
     except Exception as e:
         print(f"[SAFRAS] Erro: {e}")
