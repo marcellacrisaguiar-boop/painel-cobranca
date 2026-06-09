@@ -1,8 +1,9 @@
 """
-banco.py — Persistência via Supabase com fallback local.
+banco.py — Persistência via Supabase com fallback local Parquet.
 """
 
 import os
+import math
 import pandas as pd
 from datetime import date
 from pathlib import Path
@@ -36,38 +37,41 @@ def _safe_read(path):
 
 def _safe_write(df, path):
     try: df.to_parquet(path, index=False)
-    except Exception as e: print(f"[local] {e}")
+    except Exception as e: print(f"[local] write error: {e}")
 
-def _to_str_date(v):
+def _cv(v):
+    """Limpa valor para ser JSON-safe: NaN/inf/NaT → None, date → str."""
+    if v is None: return None
+    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)): return None
     if isinstance(v, date): return v.strftime('%Y-%m-%d')
-    if v is None or (isinstance(v, float) and pd.isna(v)): return None
+    s = str(v)
+    if s in ('nan', 'NaT', 'None', '<NA>', 'nat', ''): return None
     return v
 
-def _clean_df(df):
-    """Converte datas para string, limpa NaN/NaT/inf para None."""
-    import math
-    df = df.copy()
-    def clean_val(v):
-        if v is None: return None
-        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)): return None
-        if isinstance(v, date): return v.strftime("%Y-%m-%d")
-        if str(v) in ("nan","NaT","None","<NA>"): return None
-        return v
-    for col in df.columns:
-        df[col] = df[col].apply(clean_val)
-    return df
+def _to_records(df):
+    """Converte DataFrame para lista de dicts limpos (sem NaN)."""
+    return [{k: _cv(v) for k, v in row.items()} for row in df.to_dict('records')]
 
 def _insert_lotes(sb, tabela, records, lote=500):
-    """Insere registros em lotes."""
     total = 0
     for i in range(0, len(records), lote):
         try:
             res = sb.table(tabela).insert(records[i:i+lote]).execute()
-            total += len(res.data) if res.data else lote
+            total += len(res.data) if res.data else len(records[i:i+lote])
         except Exception as e:
-            print(f"[Supabase] Erro insert {tabela} lote {i}: {e}")
-    print(f"[Supabase] ✓ {tabela}: {total} registros inseridos")
+            print(f"[Supabase] insert {tabela} lote {i}: {e}")
+    print(f"[Supabase] ✓ {tabela}: {total} inseridos")
     return total
+
+def _normalizar_ctrl(df):
+    """Normaliza colunas de data do controle para string."""
+    df = df.copy()
+    for col in ['ENVIO', 'ULTIMO ENVIO', 'VENCIMENTO']:
+        if col in df.columns:
+            df[col] = df[col].apply(
+                lambda v: str(v)[:10] if v is not None and str(v) not in ('None','nan','NaT','') else None
+            )
+    return df
 
 # ── CONTROLE ──────────────────────────────────────────────────────────────────
 def carregar_controle() -> pd.DataFrame:
@@ -85,28 +89,26 @@ def carregar_controle() -> pd.DataFrame:
             if todos:
                 df = pd.DataFrame(todos)
                 if 'id' in df.columns: df = df.drop(columns=['id'])
-                # Normalizar datas como string
-                for col in ['ENVIO','ULTIMO ENVIO','VENCIMENTO']:
-                    if col in df.columns:
-                        df[col] = df[col].apply(lambda v: str(v)[:10] if v and str(v) != 'None' else None)
-                print(f"[Supabase] controle_envio: {len(df)} registros carregados")
+                df = _normalizar_ctrl(df)
+                print(f"[Supabase] controle_envio: {len(df)} registros")
+                _safe_write(df, CTRL_FILE)
                 return df
         except Exception as e:
-            print(f"[Supabase] carregar_controle erro: {e}")
+            print(f"[Supabase] carregar_controle: {e}")
     return _safe_read(CTRL_FILE)
 
 def salvar_controle(df: pd.DataFrame):
-    _safe_write(df, CTRL_FILE)  # sempre salva local
+    df = _normalizar_ctrl(df)
+    _safe_write(df, CTRL_FILE)
     sb = _get_sb()
     if not sb: return
     try:
-        # Limpar e reinserir
         sb.table('controle_envio').delete().gt('id', 0).execute()
         if len(df) == 0: return
-        records = _clean_df(df).to_dict('records')
+        records = _to_records(df)
         _insert_lotes(sb, 'controle_envio', records)
     except Exception as e:
-        print(f"[Supabase] salvar_controle erro: {e}")
+        print(f"[Supabase] salvar_controle: {e}")
 
 # ── HISTÓRICO DE PAGAMENTOS ───────────────────────────────────────────────────
 def carregar_historico() -> pd.DataFrame:
@@ -117,9 +119,10 @@ def carregar_historico() -> pd.DataFrame:
             if res.data:
                 df = pd.DataFrame(res.data)
                 if 'id' in df.columns: df = df.drop(columns=['id'])
+                _safe_write(df, HIST_FILE)
                 return df
         except Exception as e:
-            print(f"[Supabase] carregar_historico erro: {e}")
+            print(f"[Supabase] carregar_historico: {e}")
     return _safe_read(HIST_FILE)
 
 def salvar_historico(df: pd.DataFrame):
@@ -129,10 +132,9 @@ def salvar_historico(df: pd.DataFrame):
     try:
         sb.table('historico_pagamentos').delete().gt('id', 0).execute()
         if len(df) == 0: return
-        records = _clean_df(df).to_dict('records')
-        _insert_lotes(sb, 'historico_pagamentos', records)
+        _insert_lotes(sb, 'historico_pagamentos', _to_records(df))
     except Exception as e:
-        print(f"[Supabase] salvar_historico erro: {e}")
+        print(f"[Supabase] salvar_historico: {e}")
 
 # ── SNAPSHOTS ─────────────────────────────────────────────────────────────────
 def carregar_snapshots() -> pd.DataFrame:
@@ -143,9 +145,10 @@ def carregar_snapshots() -> pd.DataFrame:
             if res.data:
                 df = pd.DataFrame(res.data)
                 if 'id' in df.columns: df = df.drop(columns=['id'])
+                _safe_write(df, SNAP_FILE)
                 return df
         except Exception as e:
-            print(f"[Supabase] carregar_snapshots erro: {e}")
+            print(f"[Supabase] carregar_snapshots: {e}")
     return _safe_read(SNAP_FILE)
 
 def salvar_snapshot(safra, gross, estorno, pagamentos, data=None):
@@ -160,14 +163,27 @@ def salvar_snapshot(safra, gross, estorno, pagamentos, data=None):
     if sb:
         try:
             sb.table('snapshots_estorno').insert(novo).execute()
-            print(f"[Supabase] snapshot salvo: {safra} {hoje}")
+            print(f"[Supabase] snapshot: {safra} {hoje}")
         except Exception as e:
-            print(f"[Supabase] salvar_snapshot erro: {e}")
+            print(f"[Supabase] salvar_snapshot: {e}")
     snap = carregar_snapshots()
     _safe_write(snap, SNAP_FILE)
     return snap
 
 # ── HISTÓRICO DE ENVIOS ───────────────────────────────────────────────────────
+# Mapeamento colunas painel → Supabase (sem espaços problemáticos)
+ETAPA_COL_MAP = {
+    'Preventivo': 'Preventivo',
+    'Etapa 1': 'Etapa 1',
+    'Etapa 2': 'Etapa 2',
+    'Etapa 3': 'Etapa 3',
+    'Etapa 4': 'Etapa 4',
+    'Etapa 5': 'Etapa 5',
+    'Etapa 6': 'Etapa 6',
+    'Etapa 7': 'Etapa 7',
+    'Etapa 8': 'Etapa 8',
+}
+
 def carregar_historico_envios() -> pd.DataFrame:
     sb = _get_sb()
     if sb:
@@ -183,79 +199,76 @@ def carregar_historico_envios() -> pd.DataFrame:
             if todos:
                 df = pd.DataFrame(todos)
                 if 'id' in df.columns: df = df.drop(columns=['id'])
+                # Renomear colunas do Supabase de volta para exibição
+                rename = {'NUMERO_PORTADO': 'NUMERO PORTADO', 'NUMERO_LINHA': 'NUMERO LINHA'}
+                df = df.rename(columns=rename)
+                _safe_write(df, ENVI_FILE)
+                print(f"[Supabase] historico_envios: {len(df)} registros")
                 return df
         except Exception as e:
-            print(f"[Supabase] carregar_historico_envios erro: {e}")
+            print(f"[Supabase] carregar_historico_envios: {e}")
     return _safe_read(ENVI_FILE)
 
 def registrar_envios_historico(df_enviados: pd.DataFrame, etapa: str, data_envio: date):
-    """Uma linha por cliente, coluna por etapa com a data."""
     if df_enviados is None or len(df_enviados) == 0: return
     data_str = data_envio.strftime('%Y-%m-%d')
+    col_sb   = ETAPA_COL_MAP.get(etapa, etapa)
 
-    # Atualizar local primeiro
+    # 1. Atualizar local
     df_hist = _safe_read(ENVI_FILE)
     novos = []
     for _, row in df_enviados.iterrows():
         cpf   = str(row.get('CPF','') or '')
         safra = str(row.get('SAFRA','') or '')
         if not cpf: continue
-        base = {
-            'CPF': cpf,
-            'NOME': str(row.get('NOME','') or ''),
-            'NUMERO PORTADO': str(row.get('NUMERO PORTADO','') or ''),
-            'NUMERO LINHA': str(row.get('NUMERO LINHA','') or ''),
-            'SAFRA': safra,
-            'PORTABILIDADE': str(row.get('PORTABILIDADE','') or ''),
-            etapa: data_str,
-        }
         if len(df_hist) > 0 and 'CPF' in df_hist.columns:
-            mask = (df_hist['CPF'].astype(str) == cpf) & (df_hist['SAFRA'].astype(str) == safra)
+            mask = (df_hist['CPF'].astype(str)==cpf) & (df_hist['SAFRA'].astype(str)==safra)
             if mask.any():
                 df_hist.loc[mask, etapa] = data_str
                 continue
-        novos.append(base)
-
+        novos.append({
+            'CPF': cpf, 'NOME': str(row.get('NOME','') or ''),
+            'NUMERO PORTADO': str(row.get('NUMERO PORTADO','') or ''),
+            'NUMERO LINHA':   str(row.get('NUMERO LINHA','') or ''),
+            'SAFRA': safra, 'PORTABILIDADE': str(row.get('PORTABILIDADE','') or ''),
+            etapa: data_str,
+        })
     if novos:
         df_hist = pd.concat([df_hist, pd.DataFrame(novos)], ignore_index=True)
     _safe_write(df_hist, ENVI_FILE)
 
-    # Salvar no Supabase
+    # 2. Supabase
     sb = _get_sb()
     if not sb: return
-    try:
-        for _, row in df_enviados.iterrows():
-            cpf   = str(row.get('CPF','') or '')
-            safra = str(row.get('SAFRA','') or '')
-            if not cpf: continue
-            try:
-                # Verificar se existe
-                res = sb.table('historico_envios').select('id').eq('CPF', cpf).eq('SAFRA', safra).execute()
-                if res.data:
-                    # Atualizar coluna da etapa
-                    sb.table('historico_envios').update({etapa: data_str})\
-                      .eq('CPF', cpf).eq('SAFRA', safra).execute()
-                else:
-                    # Inserir nova linha
-                    sb.table('historico_envios').insert({
-                        'CPF': cpf,
-                        'NOME': str(row.get('NOME','') or ''),
-                        'NUMERO PORTADO': str(row.get('NUMERO PORTADO','') or ''),
-                        'NUMERO LINHA': str(row.get('NUMERO LINHA','') or ''),
-                        'SAFRA': safra,
-                        'PORTABILIDADE': str(row.get('PORTABILIDADE','') or ''),
-                        etapa: data_str,
-                    }).execute()
-            except Exception as e:
-                print(f"[Supabase] historico_envios {cpf}: {e}")
-        print(f"[Supabase] ✓ historico_envios: {len(df_enviados)} registros — {etapa}")
-    except Exception as e:
-        print(f"[Supabase] registrar_envios_historico erro: {e}")
+    ok = 0
+    for _, row in df_enviados.iterrows():
+        cpf   = str(row.get('CPF','') or '')
+        safra = str(row.get('SAFRA','') or '')
+        if not cpf: continue
+        try:
+            res = sb.table('historico_envios').select('id').eq('CPF', cpf).eq('SAFRA', safra).execute()
+            if res.data:
+                sb.table('historico_envios').update({col_sb: data_str})\
+                  .eq('CPF', cpf).eq('SAFRA', safra).execute()
+            else:
+                sb.table('historico_envios').insert({
+                    'CPF': cpf,
+                    'NOME': str(row.get('NOME','') or ''),
+                    'NUMERO_PORTADO': str(row.get('NUMERO PORTADO','') or ''),
+                    'NUMERO_LINHA':   str(row.get('NUMERO LINHA','') or ''),
+                    'SAFRA': safra,
+                    'PORTABILIDADE': str(row.get('PORTABILIDADE','') or ''),
+                    col_sb: data_str,
+                }).execute()
+            ok += 1
+        except Exception as e:
+            print(f"[Supabase] historico_envios {cpf}: {e}")
+    print(f"[Supabase] ✓ historico_envios: {ok}/{len(df_enviados)} — {etapa}")
 
 # ── ATUALIZAÇÃO ───────────────────────────────────────────────────────────────
 def atualizar_banco(df_ctrl_atual, df_novo, safra):
-    HIST_COLS = ['ENVIO','ULTIMO ENVIO','STATUS PAGAMENTO']
-    KEY_COLS  = ['NUMERO DE ACESSO','FATURA']
+    HIST_COLS = ['ENVIO', 'ULTIMO ENVIO', 'STATUS PAGAMENTO']
+    KEY_COLS  = ['NUMERO DE ACESSO', 'FATURA']
     OBRIG     = KEY_COLS + HIST_COLS + ['SAFRA']
 
     for c in OBRIG:

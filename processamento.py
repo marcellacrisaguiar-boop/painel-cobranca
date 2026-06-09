@@ -317,9 +317,18 @@ def _salvar_safra_supabase(df: pd.DataFrame, safra: str, linhas_conectadas: int 
             if isinstance(v, float) and (_math.isnan(v) or _math.isinf(v)): return None
             if str(v) in ("nan","NaT","None","<NA>"): return None
             return v
+        import math as _math
+        def _cv_local(v):
+            if v is None: return None
+            if isinstance(v, float) and (_math.isnan(v) or _math.isinf(v)): return None
+            from datetime import date as _date
+            if isinstance(v, _date): return v.strftime("%Y-%m-%d")
+            s = str(v)
+            if s in ("nan","NaT","None","<NA>",""): return None
+            return v
         records = []
         for r in df_save.to_dict("records"):
-            records.append({k: _cv(v) for k,v in r.items()})
+            records.append({k: _cv_local(v) for k,v in r.items()})
         for i in range(0, len(records), 500):
             sb.table("safras").insert(records[i:i+500]).execute()
         print(f"[SAFRAS] ✓ {safra}: {faturas_enc} registros | cobertura {cobertura}%")
