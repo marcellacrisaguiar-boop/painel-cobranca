@@ -208,25 +208,6 @@ with st.sidebar:
         filtro_safra=[]; filtro_etapa=[]; filtro_port='Todas'; venc_ini=None; venc_fim=None
 
     st.markdown("---")
-    if st.button("🔧 Testar Supabase", use_container_width=True):
-        from banco import _get_sb
-        sb = _get_sb()
-        if not sb:
-            st.error("❌ Cliente não criado — verifique SUPABASE_URL e SUPABASE_KEY nos Secrets")
-        else:
-            try:
-                res = sb.table('snapshots_estorno').insert({
-                    'DATA': '2099-01-01', 'SAFRA': '__TESTE__',
-                    'GROSS': 1, 'ESTORNO': 0, 'PAGAMENTOS': 0, 'PCT_ESTORNO': 0.0
-                }).execute()
-                if res.data:
-                    sb.table('snapshots_estorno').delete().eq('SAFRA', '__TESTE__').execute()
-                    st.success("✅ Supabase OK! Insert/Delete funcionando.")
-                else:
-                    st.error(f"Insert retornou vazio: {res}")
-            except Exception as e:
-                st.error(f"Erro Supabase: {e}")
-
     if st.button("🗑️ Limpar dados", use_container_width=True):
         from pathlib import Path
         for f in Path(__file__).parent.glob('data/*.parquet'): f.unlink()
